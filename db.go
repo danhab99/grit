@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const schema string = `
@@ -53,7 +55,7 @@ func NewDatabase(repo_path string) (Database, error) {
 	}
 
 	log.Printf("Opening database at %s/db\n", repo_path)
-	db, err := sql.Open("sqlite", fmt.Sprintf("%s/db", repo_path))
+	db, err := sql.Open("sqlite3", fmt.Sprintf("%s/db", repo_path))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -97,13 +99,13 @@ func (d Database) getObjectPath(h string) string {
 type Task struct {
 	ID     int64
 	Name   string
-	Script sql.NullString
+	Script string
 }
 
 type Step struct {
 	ID         int64
 	TaskID     int64
-	ObjectHash sql.NullString
+	ObjectHash string
 	Object     []byte
 
 	PrevStep *Step
@@ -183,8 +185,8 @@ WHERE t.name = ?
 
 			step.Task = &task
 
-			if step.ObjectHash.Valid {
-				obj, err := os.ReadFile(d.getObjectPath(step.ObjectHash.String))
+			if step.ObjectHash != "" {
+				obj, err := os.ReadFile(d.getObjectPath(step.ObjectHash))
 				if err != nil {
 					panic(err)
 				}
@@ -194,11 +196,11 @@ WHERE t.name = ?
 			if prevID.Valid {
 				prev := &Step{
 					ID:         prevID.Int64,
-					ObjectHash: prevHash,
+					ObjectHash: prevHash.String,
 				}
 
-				if prev.ObjectHash.Valid {
-					obj, err := os.ReadFile(d.getObjectPath(prev.ObjectHash.String))
+				if prev.ObjectHash != "" {
+					obj, err := os.ReadFile(d.getObjectPath(prev.ObjectHash))
 					if err != nil {
 						panic(err)
 					}

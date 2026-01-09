@@ -8,7 +8,7 @@ import (
 
 func runStep(s *Step, db Database) {
 	fmt.Printf("Running step %d for task: %s\n", s.ID, s.Task.Name)
-	cmd := exec.Command("sh", "-c", s.Task.Script.String)
+	cmd := exec.Command("sh", "-c", s.Task.Script)
 
 	input_file, err := os.CreateTemp("/tmp", "*")
 	if err != nil {

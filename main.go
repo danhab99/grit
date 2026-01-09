@@ -38,28 +38,42 @@ func main() {
 		panic(err)
 	}
 
-	bus := make([]chan Step, len(manifest.Tasks))
+	iterate := func() chan Step {
+		bus := make([]chan Step, len(manifest.Tasks))
 
-	fmt.Println("Registering tasks...")
-	for i, task := range manifest.Tasks {
-		fmt.Printf("  - %s\n", task.Name)
-		database.RegisterTask(task.Name, task.Script.String)
-		bus[i], err = database.IterateTasks(task.Name)
+		fmt.Println("Registering tasks...")
+		for i, task := range manifest.Tasks {
+			fmt.Printf("	- %s\n", task.Name)
+			database.RegisterTask(task.Name, task.Script)
+			bus[i], err = database.IterateTasks(task.Name)
+		}
+
+		fmt.Println("Processing steps...")
+
+		return chans.Merge(bus...)
 	}
 
-	fmt.Println("Processing steps...")
-	stepCount := 0
-
-	tasks := chans.Merge(bus...)
+	tasks := make(chan Step)
 
 	for goid := 0; goid < *parallel; goid++ {
 		go func() {
 			for task := range tasks {
-				stepCount++
 				runStep(&task, database)
 			}
 		}()
 	}
 
-	fmt.Printf("Completed processing %d steps\n", stepCount)
+	totalSteps := 0
+	runCount := 1
+	for runCount > 0 {
+		runCount = 0
+		for step := range iterate() {
+			runCount++
+			totalSteps++
+			tasks <- step
+		}
+	}
+	close(tasks)
+
+	fmt.Printf("Completed processing %d steps\n", totalSteps)
 }
