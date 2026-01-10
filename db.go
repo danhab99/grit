@@ -15,7 +15,7 @@ const schema string = `
 CREATE TABLE IF NOT EXISTS task(
   id     INTEGER PRIMARY KEY AUTOINCREMENT,
 	name   TEXT UNIQUE,
-	script TEXT,
+	script TEXT
 );
 
 CREATE TABLE IF NOT EXISTS step (
@@ -24,7 +24,6 @@ CREATE TABLE IF NOT EXISTS step (
 	task        INTEGER,
 
 	FOREIGN KEY(task)      REFERENCES task(id)
-	FOREIGN KEY(next_step) REFERENCES step(id)
 );
 
 CREATE TABLE IF NOT EXISTS step_link (
@@ -45,17 +44,18 @@ CREATE INDEX IF NOT EXISTS idx_step_link_from ON step_link(from_step_id);
 type Database struct {
 	db        *sql.DB
 	repo_path string
-	bus       map[string]chan Step
 }
 
 func NewDatabase(repo_path string) (Database, error) {
-	err := os.MkdirAll(repo_path, os.ModeDir)
+	p := fmt.Sprintf("%s", repo_path)
+
+	err := os.MkdirAll(p, 0755)
 	if err != nil {
 		return Database{}, err
 	}
 
 	log.Printf("Opening database at %s/db\n", repo_path)
-	db, err := sql.Open("sqlite3", fmt.Sprintf("%s/db", repo_path))
+	db, err := sql.Open("sqlite3", fmt.Sprintf("%s/db", p))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -70,22 +70,22 @@ func NewDatabase(repo_path string) (Database, error) {
 		return Database{}, err
 	}
 
-	return Database{db, repo_path, make(map[string]chan Step)}, nil
+	return Database{db, repo_path}, nil
 }
 
 func (d Database) RegisterTask(name string, script string) {
 	d.db.Exec(`
 INSERT INTO task (name, script)
-VALUES ('?1', '?2')
+VALUES (?, ?)
 ON CONFLICT(name)
 DO NOTHING;
-`)
+`, name, script)
 }
 
 func (d Database) getObjectPath(h string) string {
 	dir := fmt.Sprintf(
-		"%s/objects/%s/%s",
-		d.repo_path, h[0:2], h[2:4],
+		"%s/objects/%s/%s/%s",
+		d.repo_path, h[0:2], h[2:4], h[4:6],
 	)
 
 	err := os.MkdirAll(dir, os.ModeDir)
@@ -93,7 +93,7 @@ func (d Database) getObjectPath(h string) string {
 		panic(err)
 	}
 
-	return fmt.Sprintf("%s/%s", dir, h[4:])
+	return fmt.Sprintf("%s/%s", dir, h[6:])
 }
 
 type Task struct {
@@ -112,7 +112,7 @@ type Step struct {
 	Task     *Task
 }
 
-func (d Database) IterateTasks(name string) (chan Step, error) {
+func (d Database) IterateTasks(name string, loadObject bool) (chan Step, error) {
 	rows, err := d.db.Query(`
 SELECT
   s.id,
@@ -144,21 +144,12 @@ WHERE t.name = ?
 	}
 
 	out := make(chan Step)
-	d.bus[name] = out
 
 	go func() {
 		defer close(out)
-		defer close(d.bus[name])
 		defer rows.Close()
 
 		for rows.Next() {
-
-			select {
-			case x := <-d.bus[name]:
-				out <- x
-			default:
-			}
-
 			var (
 				step Step
 
@@ -185,7 +176,7 @@ WHERE t.name = ?
 
 			step.Task = &task
 
-			if step.ObjectHash != "" {
+			if loadObject && step.ObjectHash != "" {
 				obj, err := os.ReadFile(d.getObjectPath(step.ObjectHash))
 				if err != nil {
 					panic(err)
@@ -237,11 +228,9 @@ func (d Database) InsertStep(s Step) error {
 	}
 
 	_, err = d.db.Exec(`
-INSERT INTO step (hash, task)
-VALUES ('?1', '?2');
+INSERT INTO step (object_hash, task)
+VALUES (?, ?);
 `, hash, s.TaskID)
-
-	d.bus[s.Task.Name] <- s
 
 	return err
 }
