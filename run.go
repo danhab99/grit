@@ -4,7 +4,55 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+
+	"github.com/danhab99/idk/chans"
 )
+
+func run(manifest Manifest, database Database, parallel int) {
+	iterate := func() chan Step {
+		bus := make([]chan Step, len(manifest.Tasks))
+
+		fmt.Println("Registering tasks...")
+		for i, task := range manifest.Tasks {
+			fmt.Printf("	- %s\n", task.Name)
+			database.RegisterTask(task.Name, task.Script)
+
+			var err error
+			bus[i], err = database.IterateTasks(task.Name, true)
+			if err != nil {
+				panic(err)
+			}
+		}
+
+		fmt.Println("Processing steps...")
+
+		return chans.Merge(bus...)
+	}
+
+	tasks := make(chan Step)
+
+	for range parallel {
+		go func() {
+			for task := range tasks {
+				runStep(&task, database)
+			}
+		}()
+	}
+
+	totalSteps := 0
+	runCount := 1
+	for runCount > 0 {
+		runCount = 0
+		for step := range iterate() {
+			runCount++
+			totalSteps++
+			tasks <- step
+		}
+	}
+	close(tasks)
+
+	fmt.Printf("Completed processing %d steps\n", totalSteps)
+}
 
 func runStep(s *Step, db Database) {
 	fmt.Printf("Running step %d for task: %s\n", s.ID, s.Task.Name)
@@ -40,7 +88,7 @@ func runStep(s *Step, db Database) {
 			continue
 		}
 
-		body, err := os.ReadFile(file.Name())
+		body, err := os.ReadFile(fmt.Sprintf("%s/%s", output_dir, file.Name()))
 		if err != nil {
 			panic(err)
 		}

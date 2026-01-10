@@ -6,7 +6,6 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/danhab99/idk/chans"
 	"github.com/pelletier/go-toml"
 )
 
@@ -14,10 +13,11 @@ func main() {
 	manifest_path := flag.String("manifest", "", "manifest path")
 	db_path := flag.String("db", "./db", "database path")
 	parallel := flag.Int("parallel", runtime.NumCPU(), "number of processes to run in parallel")
+	exportName := flag.String("export", "", "export a specific task")
+	runPipeline := flag.Bool("run", false, "run the pipeline")
 
 	flag.Parse()
 
-	fmt.Printf("Starting task-pipeline...\n")
 	fmt.Printf("Loading manifest from: %s\n", *manifest_path)
 
 	manifest_toml, err := os.ReadFile(*manifest_path)
@@ -38,42 +38,9 @@ func main() {
 		panic(err)
 	}
 
-	iterate := func() chan Step {
-		bus := make([]chan Step, len(manifest.Tasks))
-
-		fmt.Println("Registering tasks...")
-		for i, task := range manifest.Tasks {
-			fmt.Printf("	- %s\n", task.Name)
-			database.RegisterTask(task.Name, task.Script)
-			bus[i], err = database.IterateTasks(task.Name)
-		}
-
-		fmt.Println("Processing steps...")
-
-		return chans.Merge(bus...)
+	if *runPipeline {
+		run(manifest, database, *parallel)
+	} else if export != nil && *exportName != "" {
+		export(manifest, database, *exportName)
 	}
-
-	tasks := make(chan Step)
-
-	for goid := 0; goid < *parallel; goid++ {
-		go func() {
-			for task := range tasks {
-				runStep(&task, database)
-			}
-		}()
-	}
-
-	totalSteps := 0
-	runCount := 1
-	for runCount > 0 {
-		runCount = 0
-		for step := range iterate() {
-			runCount++
-			totalSteps++
-			tasks <- step
-		}
-	}
-	close(tasks)
-
-	fmt.Printf("Completed processing %d steps\n", totalSteps)
 }
