@@ -18,6 +18,7 @@ func main() {
 	exportName := flag.String("export", "", "export a specific task")
 	exportMode := flag.String("export-mode", "output", "export mode: 'input' or 'output' (default: output)")
 	runPipeline := flag.Bool("run", false, "run the pipeline")
+	startTask := flag.String("start", "", "task to start from (optional, defaults to start task in manifest)")
 
 	flag.Parse()
 
@@ -42,7 +43,7 @@ func main() {
 	}
 
 	if *runPipeline {
-		run(manifest, database, *parallel)
+		run(manifest, database, *parallel, *startTask)
 	} else if exportName != nil && *exportName != "" {
 		exportResults(database, *exportName, *exportMode)
 	}

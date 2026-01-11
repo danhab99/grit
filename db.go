@@ -267,6 +267,18 @@ func (d Database) GetResultsByTaskName(name string, mode string) ([]Result, erro
 	return results, rows.Err()
 }
 
+func (d Database) MarkTaskResultsUnprocessed(taskName string) (int64, error) {
+	res, err := d.db.Exec(`
+		UPDATE result
+		SET processed = 0
+		WHERE task_id = (SELECT id FROM task WHERE name = ?)
+	`, taskName)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (d Database) GetStartTask() (*Task, error) {
 	var task Task
 	err := d.db.QueryRow("SELECT id, name, script, is_start FROM task WHERE is_start = 1 LIMIT 1").Scan(

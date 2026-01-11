@@ -25,7 +25,7 @@ func extractTaskName(filename string) string {
 	return base
 }
 
-func run(manifest Manifest, database Database, parallel int) {
+func run(manifest Manifest, database Database, parallel int, startTaskName string) {
 	runLogger.Println("Registering tasks...")
 	for _, task := range manifest.Tasks {
 		if task.Start {
@@ -36,20 +36,54 @@ func run(manifest Manifest, database Database, parallel int) {
 		database.RegisterTask(task.Name, task.Script, task.Start)
 	}
 
-	startTask, err := database.GetStartTask()
-	if err != nil {
-		panic(err)
-	}
-
-	if startTask != nil {
-		unprocessed, err := database.GetUnprocessedResults()
+	// Determine which task to start from
+	var startTask *Task
+	var err error
+	
+	if startTaskName != "" {
+		runLogger.Printf("Starting from task: %s", startTaskName)
+		startTask, err = database.GetTaskByName(startTaskName)
 		if err != nil {
 			panic(err)
 		}
-
-		if len(unprocessed) == 0 {
-			runLogger.Printf("Seeding start task: %s", startTask.Name)
-			database.InsertResult("", &startTask.ID, nil)
+		if startTask == nil {
+			panic(fmt.Sprintf("Task '%s' not found", startTaskName))
+		}
+		
+		// Mark all results for this task as unprocessed to re-run them
+		count, err := database.MarkTaskResultsUnprocessed(startTaskName)
+		if err != nil {
+			panic(err)
+		}
+		if count > 0 {
+			runLogger.Printf("Marked %d existing results as unprocessed for task '%s'", count, startTaskName)
+		} else {
+			// No existing results, create an initial empty one
+			_, _, err := database.InsertResult("", &startTask.ID, nil)
+			if err != nil {
+				panic(err)
+			}
+			runLogger.Printf("Created initial result for task '%s' (no existing results found)", startTask.Name)
+		}
+	} else {
+		startTask, err = database.GetStartTask()
+		if err != nil {
+			panic(err)
+		}
+		if startTask == nil {
+			panic("No start task found in manifest")
+		}
+		runLogger.Printf("Starting from default start task: %s", startTask.Name)
+		
+		// Create initial result for the start task if it doesn't exist
+		_, isNew, err := database.InsertResult("", &startTask.ID, nil)
+		if err != nil {
+			panic(err)
+		}
+		if isNew {
+			runLogger.Printf("Created initial result for task '%s'", startTask.Name)
+		} else {
+			runLogger.Printf("Initial result for task '%s' already exists", startTask.Name)
 		}
 	}
 
@@ -61,7 +95,7 @@ func run(manifest Manifest, database Database, parallel int) {
 		go func() {
 			defer wg.Done()
 			for result := range jobs {
-				processResult(result, database)
+				result.deriveResults(database)
 			}
 		}()
 	}
@@ -77,7 +111,7 @@ func run(manifest Manifest, database Database, parallel int) {
 			break
 		}
 
-		runLogger.Printf("Processing %d results...", len(unprocessed))
+		runLogger.Printf("Processing %d unprocessed results...", len(unprocessed))
 		for _, result := range unprocessed {
 			jobs <- result
 			totalProcessed++
@@ -92,7 +126,7 @@ func run(manifest Manifest, database Database, parallel int) {
 			go func() {
 				defer wg.Done()
 				for result := range jobs {
-					processResult(result, database)
+					result.deriveResults(database)
 				}
 			}()
 		}
@@ -104,7 +138,7 @@ func run(manifest Manifest, database Database, parallel int) {
 	runLogger.Printf("Completed processing %d results", totalProcessed)
 }
 
-func processResult(r Result, db Database) {
+func (r Result) deriveResults(db Database) {
 	task, err := db.GetTaskByID(*r.TaskID)
 	if err != nil {
 		panic(err)
@@ -197,7 +231,7 @@ func processResult(r Result, db Database) {
 	// Wait for command to complete
 	if err := cmd.Wait(); err != nil {
 		runLogger.Printf("  Error executing script: %v", err)
-		panic(err)
+		// panic(err)
 	}
 
 	entries, err := os.ReadDir(outputDir)
