@@ -1,12 +1,22 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
-func export(manifest Manifest, database Database, name string) {
-	steps, err := database.IterateTasks(name, false)
-	if err != nil { panic (err) }
+func exportResults(database Database, taskName string, mode string) {
+	fmt.Fprintf(os.Stderr, "Exporting %s for task '%s'\n", mode, taskName)
+	
+	results, err := database.GetResultsByTaskName(taskName, mode)
+	if err != nil {
+		panic(err)
+	}
 
-	for step := range steps {
-		fmt.Println("%s -> %s", step.PrevStep.ObjectHash, step.ObjectHash)
+	fmt.Fprintf(os.Stderr, "Found %d results\n", len(results))
+	
+	for _, hash := range results {
+		objectPath := database.GetObjectPath(hash)
+		fmt.Println(objectPath)
 	}
 }

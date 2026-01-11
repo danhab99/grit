@@ -4,105 +4,205 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-
-	"github.com/danhab99/idk/chans"
+	"strings"
+	"sync"
 )
 
+func extractTaskName(filename string) string {
+	base := filename
+	if idx := strings.LastIndex(filename, "."); idx != -1 {
+		base = filename[:idx]
+	}
+	
+	if idx := strings.Index(base, "_"); idx != -1 {
+		return base[:idx]
+	}
+	
+	return base
+}
+
 func run(manifest Manifest, database Database, parallel int) {
-	iterate := func() chan Step {
-		bus := make([]chan Step, len(manifest.Tasks))
-
-		fmt.Println("Registering tasks...")
-		for i, task := range manifest.Tasks {
-			fmt.Printf("	- %s\n", task.Name)
-			database.RegisterTask(task.Name, task.Script)
-
-			var err error
-			bus[i], err = database.IterateTasks(task.Name, true)
-			if err != nil {
-				panic(err)
-			}
+	fmt.Println("Registering tasks...")
+	for _, task := range manifest.Tasks {
+		fmt.Printf("  - %s", task.Name)
+		if task.Start {
+			fmt.Printf(" (START TASK)")
 		}
-
-		fmt.Println("Processing steps...")
-
-		return chans.Merge(bus...)
+		fmt.Println()
+		database.RegisterTask(task.Name, task.Script, task.Start)
 	}
 
-	tasks := make(chan Step)
+	startTask, err := database.GetStartTask()
+	if err != nil {
+		panic(err)
+	}
 
-	for range parallel {
+	if startTask != nil {
+		unprocessed, err := database.GetUnprocessedResults()
+		if err != nil {
+			panic(err)
+		}
+
+		if len(unprocessed) == 0 {
+			fmt.Println("Seeding start task:", startTask.Name)
+			database.InsertResult("", startTask.ID, nil)
+		}
+	}
+
+	var wg sync.WaitGroup
+	jobs := make(chan Result, parallel)
+
+	for i := 0; i < parallel; i++ {
+		wg.Add(1)
 		go func() {
-			for task := range tasks {
-				runStep(&task, database)
+			defer wg.Done()
+			for result := range jobs {
+				processResult(result, database)
 			}
 		}()
 	}
 
-	totalSteps := 0
-	runCount := 1
-	for runCount > 0 {
-		runCount = 0
-		for step := range iterate() {
-			runCount++
-			totalSteps++
-			tasks <- step
+	totalProcessed := 0
+	for {
+		unprocessed, err := database.GetUnprocessedResults()
+		if err != nil {
+			panic(err)
+		}
+
+		if len(unprocessed) == 0 {
+			break
+		}
+
+		fmt.Printf("\nProcessing %d results...\n", len(unprocessed))
+		for _, result := range unprocessed {
+			jobs <- result
+			totalProcessed++
+		}
+
+		close(jobs)
+		wg.Wait()
+
+		jobs = make(chan Result, parallel)
+		for i := 0; i < parallel; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for result := range jobs {
+					processResult(result, database)
+				}
+			}()
 		}
 	}
-	close(tasks)
 
-	fmt.Printf("Completed processing %d steps\n", totalSteps)
+	close(jobs)
+	wg.Wait()
+
+	fmt.Printf("\nCompleted processing %d results\n", totalProcessed)
 }
 
-func runStep(s *Step, db Database) {
-	fmt.Printf("Running step %d for task: %s\n", s.ID, s.Task.Name)
-	cmd := exec.Command("sh", "-c", s.Task.Script)
-
-	input_file, err := os.CreateTemp("/tmp", "*")
+func processResult(r Result, db Database) {
+	task, err := db.GetTaskByID(r.TaskID)
 	if err != nil {
 		panic(err)
 	}
-	output_dir := os.TempDir()
 
-	input_file.Write(s.Object)
+	fmt.Printf("Processing result %d for task '%s'\n", r.ID, task.Name)
 
+	err = db.MarkResultProcessed(r.ID)
+	if err != nil {
+		panic(err)
+	}
+
+	inputFile, err := os.CreateTemp("/tmp", "input-*")
+	if err != nil {
+		panic(err)
+	}
+	defer os.Remove(inputFile.Name())
+
+	if r.ObjectHash != "" {
+		objectPath := db.GetObjectPath(r.ObjectHash)
+		data, err := os.ReadFile(objectPath)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("  Input: %d bytes from %s\n", len(data), r.ObjectHash[:16]+"...")
+		_, err = inputFile.Write(data)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		fmt.Printf("  Input: (empty - start task)\n")
+	}
+	inputFile.Close()
+
+	outputDir, err := os.MkdirTemp("/tmp", "output-*")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(outputDir)
+
+	cmd := exec.Command("sh", "-c", task.Script)
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("INPUT_FILE=%s", input_file.Name()),
-		fmt.Sprintf("OUTPUT_DIR=%s", output_dir),
+		fmt.Sprintf("INPUT_FILE=%s", inputFile.Name()),
+		fmt.Sprintf("OUTPUT_DIR=%s", outputDir),
 	)
 
-	fmt.Printf("  Executing script with INPUT_FILE=%s\n", input_file.Name())
-	_, err = cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("  Error executing script: %s\n", string(output))
+		panic(err)
+	}
+
+	entries, err := os.ReadDir(outputDir)
 	if err != nil {
 		panic(err)
 	}
 
-	dirs, err := os.ReadDir(output_dir)
-	if err != nil {
-		panic(err)
-	}
-
-	outputCount := 0
-	for _, file := range dirs {
-		if file.IsDir() {
+	newCount := 0
+	skippedCount := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
 			continue
 		}
 
-		body, err := os.ReadFile(fmt.Sprintf("%s/%s", output_dir, file.Name()))
+		filename := entry.Name()
+		taskName := extractTaskName(filename)
+		filePath := fmt.Sprintf("%s/%s", outputDir, filename)
+
+		fmt.Printf("  Output: %s -> task '%s'\n", filename, taskName)
+
+		targetTask, err := db.GetTaskByName(taskName)
+		if err != nil {
+			fmt.Printf("    Warning: Error looking up task '%s': %v\n", taskName, err)
+			continue
+		}
+		if targetTask == nil {
+			fmt.Printf("    Warning: Task '%s' not found, skipping\n", taskName)
+			continue
+		}
+
+		hash, err := hashFileSHA256(filePath)
 		if err != nil {
 			panic(err)
 		}
 
-		err = db.InsertStep(Step{
-			TaskID:   s.TaskID,
-			Object:   body,
-			PrevStep: s,
-		})
+		objectPath := db.GetObjectPath(hash)
+		_, err = copyFileWithSHA256(filePath, objectPath)
 		if err != nil {
 			panic(err)
 		}
-		outputCount++
+
+		_, isNew, err := db.InsertResult(hash, targetTask.ID, &r.ID)
+		if err != nil {
+			panic(err)
+		}
+
+		if isNew {
+			newCount++
+		} else {
+			skippedCount++
+		}
 	}
-	fmt.Printf("  Generated %d output files\n", outputCount)
 
+	fmt.Printf("  Created %d new results, %d already existed\n", newCount, skippedCount)
 }

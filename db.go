@@ -1,9 +1,7 @@
 package main
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -12,33 +10,28 @@ import (
 )
 
 const schema string = `
-CREATE TABLE IF NOT EXISTS task(
-  id     INTEGER PRIMARY KEY AUTOINCREMENT,
-	name   TEXT UNIQUE,
-	script TEXT
+CREATE TABLE IF NOT EXISTS task (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  name     TEXT UNIQUE NOT NULL,
+  script   TEXT NOT NULL,
+  is_start INTEGER DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS step (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	object_hash VARCHAR(64) UNIQUE,
-	task        INTEGER,
+CREATE TABLE IF NOT EXISTS result (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  object_hash      VARCHAR(64) UNIQUE NOT NULL,
+  task_id          INTEGER NOT NULL,
+  input_result_id  INTEGER,
+  processed        INTEGER DEFAULT 0,
 
-	FOREIGN KEY(task)      REFERENCES task(id)
-);
-
-CREATE TABLE IF NOT EXISTS step_link (
-  from_step_id INTEGER NOT NULL,
-  to_step_id   INTEGER NOT NULL,
-
-  PRIMARY KEY (from_step_id, to_step_id),
-
-  FOREIGN KEY (from_step_id) REFERENCES step(id),
-  FOREIGN KEY (to_step_id)   REFERENCES step(id)
+  FOREIGN KEY(task_id) REFERENCES task(id),
+  FOREIGN KEY(input_result_id) REFERENCES result(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_name ON task(name);
-CREATE INDEX IF NOT EXISTS idx_step_task ON step(task);
-CREATE INDEX IF NOT EXISTS idx_step_link_from ON step_link(from_step_id);
+CREATE INDEX IF NOT EXISTS idx_result_task ON result(task_id);
+CREATE INDEX IF NOT EXISTS idx_result_processed ON result(processed);
+CREATE INDEX IF NOT EXISTS idx_result_input ON result(input_result_id);
 `
 
 type Database struct {
@@ -46,18 +39,31 @@ type Database struct {
 	repo_path string
 }
 
-func NewDatabase(repo_path string) (Database, error) {
-	p := fmt.Sprintf("%s", repo_path)
+type Task struct {
+	ID       int64
+	Name     string
+	Script   string
+	IsStart  bool
+}
 
-	err := os.MkdirAll(p, 0755)
+type Result struct {
+	ID            int64
+	ObjectHash    string
+	TaskID        int64
+	InputResultID *int64
+	Processed     bool
+}
+
+func NewDatabase(repo_path string) (Database, error) {
+	err := os.MkdirAll(repo_path, 0755)
 	if err != nil {
 		return Database{}, err
 	}
 
 	log.Printf("Opening database at %s/db\n", repo_path)
-	db, err := sql.Open("sqlite3", fmt.Sprintf("%s/db", p))
+	db, err := sql.Open("sqlite3", fmt.Sprintf("%s/db", repo_path))
 	if err != nil {
-		log.Fatal(err)
+		return Database{}, err
 	}
 
 	db.Exec("PRAGMA journal_mode=WAL;")
@@ -73,164 +79,183 @@ func NewDatabase(repo_path string) (Database, error) {
 	return Database{db, repo_path}, nil
 }
 
-func (d Database) RegisterTask(name string, script string) {
-	d.db.Exec(`
-INSERT INTO task (name, script)
-VALUES (?, ?)
+func (d Database) RegisterTask(name string, script string, isStart bool) (int64, error) {
+	_, err := d.db.Exec(`
+INSERT INTO task (name, script, is_start)
+VALUES (?, ?, ?)
 ON CONFLICT(name)
-DO NOTHING;
-`, name, script)
+DO UPDATE SET script = excluded.script, is_start = excluded.is_start;
+`, name, script, isStart)
+	if err != nil {
+		return 0, err
+	}
+
+	var taskID int64
+	err = d.db.QueryRow("SELECT id FROM task WHERE name = ?", name).Scan(&taskID)
+	return taskID, err
 }
 
-func (d Database) getObjectPath(h string) string {
+func (d Database) GetTaskByName(name string) (*Task, error) {
+	var task Task
+	err := d.db.QueryRow("SELECT id, name, script, is_start FROM task WHERE name = ?", name).Scan(
+		&task.ID,
+		&task.Name,
+		&task.Script,
+		&task.IsStart,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &task, nil
+}
+
+func (d Database) GetTaskByID(id int64) (*Task, error) {
+	var task Task
+	err := d.db.QueryRow("SELECT id, name, script, is_start FROM task WHERE id = ?", id).Scan(
+		&task.ID,
+		&task.Name,
+		&task.Script,
+		&task.IsStart,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &task, nil
+}
+
+func (d Database) GetObjectPath(hash string) string {
 	dir := fmt.Sprintf(
 		"%s/objects/%s/%s/%s",
-		d.repo_path, h[0:2], h[2:4], h[4:6],
+		d.repo_path, hash[0:2], hash[2:4], hash[4:6],
 	)
 
-	err := os.MkdirAll(dir, os.ModeDir)
+	err := os.MkdirAll(dir, 0755)
 	if err != nil {
 		panic(err)
 	}
 
-	return fmt.Sprintf("%s/%s", dir, h[6:])
+	return fmt.Sprintf("%s/%s", dir, hash[6:])
 }
 
-type Task struct {
-	ID     int64
-	Name   string
-	Script string
+func (d Database) InsertResult(objectHash string, taskID int64, inputResultID *int64) (int64, bool, error) {
+	res, err := d.db.Exec(`
+INSERT OR IGNORE INTO result (object_hash, task_id, input_result_id, processed)
+VALUES (?, ?, ?, 0);
+`, objectHash, taskID, inputResultID)
+	if err != nil {
+		return 0, false, err
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, err
+	}
+
+	if rowsAffected > 0 {
+		id, err := res.LastInsertId()
+		return id, true, err
+	}
+
+	// Already exists, get the ID
+	var id int64
+	err = d.db.QueryRow("SELECT id FROM result WHERE object_hash = ?", objectHash).Scan(&id)
+	return id, false, err
 }
 
-type Step struct {
-	ID         int64
-	TaskID     int64
-	ObjectHash string
-	Object     []byte
-
-	PrevStep *Step
-	Task     *Task
-}
-
-func (d Database) IterateTasks(name string, loadObject bool) (chan Step, error) {
+func (d Database) GetUnprocessedResults() ([]Result, error) {
 	rows, err := d.db.Query(`
-SELECT
-  s.id,
-  s.object_hash,
-  s.task,
-
-  ps.id,
-  ps.object_hash,
-
-  t.id,
-  t.name,
-  t.script
-FROM step s
-JOIN task t ON t.id = s.task
-LEFT JOIN step_link sl_prev
-  ON sl_prev.to_step_id = s.id
-LEFT JOIN step ps
-  ON ps.id = sl_prev.from_step_id
-WHERE t.name = ?
-  AND NOT EXISTS (
-    SELECT 1
-    FROM step_link sl
-    WHERE sl.from_step_id = s.id
-  );
-`, name)
-
+		SELECT r.id, r.object_hash, r.task_id, r.input_result_id
+		FROM result r
+		WHERE r.processed = 0
+		ORDER BY r.id
+	`)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
-	out := make(chan Step)
-
-	go func() {
-		defer close(out)
-		defer rows.Close()
-
-		for rows.Next() {
-			var (
-				step Step
-
-				prevID   sql.NullInt64
-				prevHash sql.NullString
-
-				task Task
-			)
-
-			if err := rows.Scan(
-				&step.ID,
-				&step.ObjectHash,
-				&step.TaskID,
-
-				&prevID,
-				&prevHash,
-
-				&task.ID,
-				&task.Name,
-				&task.Script,
-			); err != nil {
-				panic(err)
-			}
-
-			step.Task = &task
-
-			if loadObject && step.ObjectHash != "" {
-				obj, err := os.ReadFile(d.getObjectPath(step.ObjectHash))
-				if err != nil {
-					panic(err)
-				}
-				step.Object = obj
-			}
-
-			if prevID.Valid {
-				prev := &Step{
-					ID:         prevID.Int64,
-					ObjectHash: prevHash.String,
-				}
-
-				if prev.ObjectHash != "" {
-					obj, err := os.ReadFile(d.getObjectPath(prev.ObjectHash))
-					if err != nil {
-						panic(err)
-					}
-					prev.Object = obj
-				}
-
-				step.PrevStep = prev
-			}
-
-			out <- step
+	var results []Result
+	for rows.Next() {
+		var r Result
+		var inputID sql.NullInt64
+		err := rows.Scan(&r.ID, &r.ObjectHash, &r.TaskID, &inputID)
+		if err != nil {
+			return nil, err
 		}
-
-		if err := rows.Err(); err != nil {
-			panic(err)
+		if inputID.Valid {
+			val := inputID.Int64
+			r.InputResultID = &val
 		}
-	}()
-
-	return out, nil
-}
-
-func hash(body []byte) string {
-	b := sha256.Sum256(body)
-	return hex.EncodeToString(b[:])
-}
-
-func (d Database) InsertStep(s Step) error {
-	hash := hash(s.Object)
-
-	p := d.getObjectPath(hash)
-	log.Printf("Writing object to %s\n", p)
-	err := os.WriteFile(p, s.Object, os.ModeAppend)
-	if err != nil {
-		return err
+		results = append(results, r)
 	}
 
-	_, err = d.db.Exec(`
-INSERT INTO step (object_hash, task)
-VALUES (?, ?);
-`, hash, s.TaskID)
+	return results, rows.Err()
+}
 
+func (d Database) MarkResultProcessed(resultID int64) error {
+	_, err := d.db.Exec("UPDATE result SET processed = 1 WHERE id = ?", resultID)
 	return err
+}
+
+func (d Database) GetResultsByTaskName(name string, mode string) ([]string, error) {
+	var query string
+	if mode == "input" {
+		query = `
+			SELECT r.object_hash
+			FROM result r
+			JOIN task t ON r.task_id = t.id
+			WHERE t.name = ?
+			ORDER BY r.id
+		`
+	} else {
+		// output mode - get results created by this task
+		query = `
+			SELECT r2.object_hash
+			FROM result r1
+			JOIN task t ON r1.task_id = t.id
+			JOIN result r2 ON r2.input_result_id = r1.id
+			WHERE t.name = ?
+			ORDER BY r2.id
+		`
+	}
+
+	rows, err := d.db.Query(query, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hashes []string
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		hashes = append(hashes, hash)
+	}
+
+	return hashes, rows.Err()
+}
+
+func (d Database) GetStartTask() (*Task, error) {
+	var task Task
+	err := d.db.QueryRow("SELECT id, name, script, is_start FROM task WHERE is_start = 1 LIMIT 1").Scan(
+		&task.ID,
+		&task.Name,
+		&task.Script,
+		&task.IsStart,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &task, nil
 }

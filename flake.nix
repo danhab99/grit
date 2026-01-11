@@ -20,13 +20,13 @@
               gnumake
               go
               gopls
+              delve
+              sqlite
             ];
 
             GO_PATH="${self.outPath}/.go";
-
-            shellHook = ''
-            zsh
-            '';
+            CGO_CFLAGS="-U_FORTIFY_SOURCE";
+            CGO_CPPFLAGS="-U_FORTIFY_SOURCE";
           };
         };
       });

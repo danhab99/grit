@@ -1,6 +1,11 @@
 package main
 
 type Manifest struct {
-	Tasks []Task `toml:"task"`
+	Tasks []ManifestTask `toml:"task"`
 }
 
+type ManifestTask struct {
+	Name   string `toml:"name"`
+	Script string `toml:"script"`
+	Start  bool   `toml:"start"`
+}

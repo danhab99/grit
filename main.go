@@ -14,6 +14,7 @@ func main() {
 	db_path := flag.String("db", "./db", "database path")
 	parallel := flag.Int("parallel", runtime.NumCPU(), "number of processes to run in parallel")
 	exportName := flag.String("export", "", "export a specific task")
+	exportMode := flag.String("export-mode", "output", "export mode: 'input' or 'output' (default: output)")
 	runPipeline := flag.Bool("run", false, "run the pipeline")
 
 	flag.Parse()
@@ -40,7 +41,7 @@ func main() {
 
 	if *runPipeline {
 		run(manifest, database, *parallel)
-	} else if export != nil && *exportName != "" {
-		export(manifest, database, *exportName)
+	} else if exportName != nil && *exportName != "" {
+		exportResults(database, *exportName, *exportMode)
 	}
 }
