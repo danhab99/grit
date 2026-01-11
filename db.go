@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS task (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   name     TEXT UNIQUE NOT NULL,
   script   TEXT NOT NULL,
-  is_start INTEGER DEFAULT 0
+  is_start INTEGER DEFAULT 0,
+  parallel INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS result (
@@ -43,10 +44,11 @@ type Database struct {
 }
 
 type Task struct {
-	ID      int64
-	Name    string
-	Script  string
-	IsStart bool
+	ID       int64
+	Name     string
+	Script   string
+	IsStart  bool
+	Parallel *int
 }
 
 type Result struct {
@@ -82,13 +84,13 @@ func NewDatabase(repo_path string) (Database, error) {
 	return Database{db, repo_path}, nil
 }
 
-func (d Database) RegisterTask(name string, script string, isStart bool) (int64, error) {
+func (d Database) RegisterTask(name string, script string, isStart bool, parallel *int) (int64, error) {
 	_, err := d.db.Exec(`
-INSERT INTO task (name, script, is_start)
-VALUES (?, ?, ?)
+INSERT INTO task (name, script, is_start, parallel)
+VALUES (?, ?, ?, ?)
 ON CONFLICT(name)
-DO UPDATE SET script = excluded.script, is_start = excluded.is_start;
-`, name, script, isStart)
+DO UPDATE SET script = excluded.script, is_start = excluded.is_start, parallel = excluded.parallel;
+`, name, script, isStart, parallel)
 	if err != nil {
 		return 0, err
 	}
@@ -100,11 +102,13 @@ DO UPDATE SET script = excluded.script, is_start = excluded.is_start;
 
 func (d Database) GetTaskByName(name string) (*Task, error) {
 	var task Task
-	err := d.db.QueryRow("SELECT id, name, script, is_start FROM task WHERE name = ?", name).Scan(
+	var parallel sql.NullInt64
+	err := d.db.QueryRow("SELECT id, name, script, is_start, parallel FROM task WHERE name = ?", name).Scan(
 		&task.ID,
 		&task.Name,
 		&task.Script,
 		&task.IsStart,
+		&parallel,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -112,22 +116,32 @@ func (d Database) GetTaskByName(name string) (*Task, error) {
 		}
 		return nil, err
 	}
+	if parallel.Valid {
+		val := int(parallel.Int64)
+		task.Parallel = &val
+	}
 	return &task, nil
 }
 
 func (d Database) GetTaskByID(id int64) (*Task, error) {
 	var task Task
-	err := d.db.QueryRow("SELECT id, name, script, is_start FROM task WHERE id = ?", id).Scan(
+	var parallel sql.NullInt64
+	err := d.db.QueryRow("SELECT id, name, script, is_start, parallel FROM task WHERE id = ?", id).Scan(
 		&task.ID,
 		&task.Name,
 		&task.Script,
 		&task.IsStart,
+		&parallel,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if parallel.Valid {
+		val := int(parallel.Int64)
+		task.Parallel = &val
 	}
 	return &task, nil
 }
@@ -281,17 +295,23 @@ func (d Database) MarkTaskResultsUnprocessed(taskName string) (int64, error) {
 
 func (d Database) GetStartTask() (*Task, error) {
 	var task Task
-	err := d.db.QueryRow("SELECT id, name, script, is_start FROM task WHERE is_start = 1 LIMIT 1").Scan(
+	var parallel sql.NullInt64
+	err := d.db.QueryRow("SELECT id, name, script, is_start, parallel FROM task WHERE is_start = 1 LIMIT 1").Scan(
 		&task.ID,
 		&task.Name,
 		&task.Script,
 		&task.IsStart,
+		&parallel,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if parallel.Valid {
+		val := int(parallel.Int64)
+		task.Parallel = &val
 	}
 	return &task, nil
 }

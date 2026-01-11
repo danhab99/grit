@@ -33,13 +33,16 @@ func run(manifest Manifest, database Database, parallel int, startTaskName strin
 		} else {
 			runLogger.Printf("Task: %s", task.Name)
 		}
-		database.RegisterTask(task.Name, task.Script, task.Start)
+		if task.Parallel != nil {
+			runLogger.Printf("  Parallel limit: %d", *task.Parallel)
+		}
+		database.RegisterTask(task.Name, task.Script, task.Start, task.Parallel)
 	}
 
 	// Determine which task to start from
 	var startTask *Task
 	var err error
-	
+
 	if startTaskName != "" {
 		runLogger.Printf("Starting from task: %s", startTaskName)
 		startTask, err = database.GetTaskByName(startTaskName)
@@ -49,7 +52,7 @@ func run(manifest Manifest, database Database, parallel int, startTaskName strin
 		if startTask == nil {
 			panic(fmt.Sprintf("Task '%s' not found", startTaskName))
 		}
-		
+
 		// Mark all results for this task as unprocessed to re-run them
 		count, err := database.MarkTaskResultsUnprocessed(startTaskName)
 		if err != nil {
@@ -74,7 +77,7 @@ func run(manifest Manifest, database Database, parallel int, startTaskName strin
 			panic("No start task found in manifest")
 		}
 		runLogger.Printf("Starting from default start task: %s", startTask.Name)
-		
+
 		// Create initial result for the start task if it doesn't exist
 		_, isNew, err := database.InsertResult("", &startTask.ID, nil)
 		if err != nil {
@@ -87,15 +90,44 @@ func run(manifest Manifest, database Database, parallel int, startTaskName strin
 		}
 	}
 
+	// Track semaphores for per-task parallelism limits
+	taskSemaphores := make(map[int64]chan struct{})
+	var semMutex sync.Mutex
+
 	var wg sync.WaitGroup
 	jobs := make(chan Result, parallel)
+
+	// Worker function that respects per-task parallelism
+	processWithLimit := func(result Result, db Database) {
+		// Get task to check for parallelism limit
+		task, err := db.GetTaskByID(*result.TaskID)
+		if err != nil {
+			panic(err)
+		}
+
+		// Acquire slot from task-specific semaphore if limit is set
+		var sem chan struct{}
+		if task.Parallel != nil {
+			semMutex.Lock()
+			if taskSemaphores[task.ID] == nil {
+				taskSemaphores[task.ID] = make(chan struct{}, *task.Parallel)
+			}
+			sem = taskSemaphores[task.ID]
+			semMutex.Unlock()
+
+			sem <- struct{}{}        // Acquire
+			defer func() { <-sem }() // Release
+		}
+
+		result.deriveResults(db)
+	}
 
 	for i := 0; i < parallel; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for result := range jobs {
-				result.deriveResults(database)
+				processWithLimit(result, database)
 			}
 		}()
 	}
@@ -126,7 +158,7 @@ func run(manifest Manifest, database Database, parallel int, startTaskName strin
 			go func() {
 				defer wg.Done()
 				for result := range jobs {
-					result.deriveResults(database)
+					processWithLimit(result, database)
 				}
 			}()
 		}
