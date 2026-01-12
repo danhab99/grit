@@ -11,19 +11,20 @@ var exportLogger = log.New(os.Stderr, "[EXPORT] ", log.Ldate|log.Ltime|log.Lmsgp
 func exportResults(database Database, stepName string, mode string) {
 	exportLogger.Printf("Exporting %s for step '%s'", mode, stepName)
 
-	tasks, err := database.GetTasksByStepName(stepName, mode)
+	step, err := database.GetStepByName(stepName)
 	if err != nil {
 		panic(err)
 	}
 
+	tasks := database.GetTasksForStep(step.ID)
 	exportLogger.Printf("Found %d tasks", len(tasks))
 
-	for _, task := range tasks {
+	for task := range tasks {
 		objectPath := database.GetObjectPath(task.ObjectHash)
 
 		if mode == "output" && task.InputTaskID != nil {
 			// Get the input task to show which specific input produced this output
-			inputTask, err := database.GetTaskByID(*task.InputTaskID)
+			inputTask, err := database.GetTask(*task.InputTaskID)
 			if err != nil {
 				exportLogger.Printf("Warning: Could not get input task: %v", err)
 				fmt.Println(objectPath)

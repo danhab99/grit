@@ -84,31 +84,43 @@ func NewDatabase(repo_path string) (Database, error) {
 	return Database{db, repo_path}, nil
 }
 
-func (d Database) RegisterStep(name string, script string, isStart bool, parallel *int) (int64, error) {
-	_, err := d.db.Exec(`
+// Step CRUD operations
+
+func (d Database) CreateStep(name, script string, isStart bool, parallel *int) (int64, error) {
+	res, err := d.db.Exec(`
 INSERT INTO step (name, script, is_start, parallel)
 VALUES (?, ?, ?, ?)
-ON CONFLICT(name)
-DO UPDATE SET script = excluded.script, is_start = excluded.is_start, parallel = excluded.parallel;
 `, name, script, isStart, parallel)
 	if err != nil {
 		return 0, err
 	}
+	return res.LastInsertId()
+}
 
-	var stepID int64
-	err = d.db.QueryRow("SELECT id FROM step WHERE name = ?", name).Scan(&stepID)
-	return stepID, err
+func (d Database) GetStep(id int64) (*Step, error) {
+	var step Step
+	var parallel sql.NullInt64
+	err := d.db.QueryRow("SELECT id, name, script, is_start, parallel FROM step WHERE id = ?", id).Scan(
+		&step.ID, &step.Name, &step.Script, &step.IsStart, &parallel,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if parallel.Valid {
+		val := int(parallel.Int64)
+		step.Parallel = &val
+	}
+	return &step, nil
 }
 
 func (d Database) GetStepByName(name string) (*Step, error) {
 	var step Step
 	var parallel sql.NullInt64
 	err := d.db.QueryRow("SELECT id, name, script, is_start, parallel FROM step WHERE name = ?", name).Scan(
-		&step.ID,
-		&step.Name,
-		&step.Script,
-		&step.IsStart,
-		&parallel,
+		&step.ID, &step.Name, &step.Script, &step.IsStart, &parallel,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -123,15 +135,11 @@ func (d Database) GetStepByName(name string) (*Step, error) {
 	return &step, nil
 }
 
-func (d Database) GetStepByID(id int64) (*Step, error) {
+func (d Database) GetStartingStep() (*Step, error) {
 	var step Step
 	var parallel sql.NullInt64
-	err := d.db.QueryRow("SELECT id, name, script, is_start, parallel FROM step WHERE id = ?", id).Scan(
-		&step.ID,
-		&step.Name,
-		&step.Script,
-		&step.IsStart,
-		&parallel,
+	err := d.db.QueryRow("SELECT id, name, script, is_start, parallel FROM step WHERE is_start = 1 LIMIT 1").Scan(
+		&step.ID, &step.Name, &step.Script, &step.IsStart, &parallel,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -146,14 +154,82 @@ func (d Database) GetStepByID(id int64) (*Step, error) {
 	return &step, nil
 }
 
-func (d Database) GetTaskByID(id int64) (*Task, error) {
+func (d Database) UpdateStep(id int64, name, script string, isStart bool, parallel *int) error {
+	_, err := d.db.Exec(`
+UPDATE step 
+SET name = ?, script = ?, is_start = ?, parallel = ?
+WHERE id = ?
+`, name, script, isStart, parallel, id)
+	return err
+}
+
+func (d Database) DeleteStep(id int64) error {
+	_, err := d.db.Exec("DELETE FROM step WHERE id = ?", id)
+	return err
+}
+
+func (d Database) CountSteps() (int64, error) {
+	var count int64
+	err := d.db.QueryRow("SELECT COUNT(*) FROM step").Scan(&count)
+	return count, err
+}
+
+func (d Database) CountStepsWithoutParallel() (int64, error) {
+	var count int64
+	err := d.db.QueryRow("SELECT COUNT(*) FROM step WHERE parallel IS NOT NULL").Scan(&count)
+	return count, err
+}
+
+func (d Database) ListSteps() chan Step {
+	stepChan := make(chan Step)
+
+	go func() {
+		defer close(stepChan)
+
+		rows, err := d.db.Query("SELECT id, name, script, is_start, parallel FROM step ORDER BY id")
+		if err != nil {
+			panic(err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var step Step
+			var parallel sql.NullInt64
+			if err := rows.Scan(&step.ID, &step.Name, &step.Script, &step.IsStart, &parallel); err != nil {
+				panic(err)
+			}
+			if parallel.Valid {
+				val := int(parallel.Int64)
+				step.Parallel = &val
+			}
+			stepChan <- step
+		}
+
+		if err := rows.Err(); err != nil {
+			panic(err)
+		}
+	}()
+
+	return stepChan
+}
+
+// Task CRUD operations
+
+func (d Database) CreateTask(objectHash string, stepID *int64, inputTaskID *int64) (int64, error) {
+	res, err := d.db.Exec(`
+INSERT INTO task (object_hash, step_id, input_task_id, processed)
+VALUES (?, ?, ?, 0)
+`, objectHash, stepID, inputTaskID)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d Database) GetTask(id int64) (*Task, error) {
 	var t Task
 	err := d.db.QueryRow("SELECT id, object_hash, step_id, input_task_id, processed FROM task WHERE id = ?", id).Scan(
-		&t.ID,
-		&t.ObjectHash,
-		&t.StepID,
-		&t.InputTaskID,
-		&t.Processed,
+		&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -163,6 +239,169 @@ func (d Database) GetTaskByID(id int64) (*Task, error) {
 	}
 	return &t, nil
 }
+
+func (d Database) TaskExists(id int64) (bool, error) {
+	var exists bool
+	err := d.db.QueryRow("SELECT EXISTS(SELECT 1 FROM task WHERE id = ?)", id).Scan(&exists)
+	return exists, err
+}
+
+func (d Database) UpdateTask(id int64, objectHash string, stepID *int64, inputTaskID *int64, processed bool) error {
+	_, err := d.db.Exec(`
+UPDATE task 
+SET object_hash = ?, step_id = ?, input_task_id = ?, processed = ?
+WHERE id = ?
+`, objectHash, stepID, inputTaskID, processed, id)
+	return err
+}
+
+func (d Database) DeleteTask(id int64) error {
+	_, err := d.db.Exec("DELETE FROM task WHERE id = ?", id)
+	return err
+}
+
+func (d Database) ListTasks() chan Task {
+	taskChan := make(chan Task)
+
+	go func() {
+		defer close(taskChan)
+
+		rows, err := d.db.Query("SELECT id, object_hash, step_id, input_task_id, processed FROM task ORDER BY id")
+		if err != nil {
+			panic(err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var t Task
+			if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed); err != nil {
+				panic(err)
+			}
+			taskChan <- t
+		}
+
+		if err := rows.Err(); err != nil {
+			panic(err)
+		}
+	}()
+
+	return taskChan
+}
+
+// Relational operators
+
+func (d Database) GetTasksForStep(stepID int64) chan Task {
+	taskChan := make(chan Task)
+
+	go func() {
+		defer close(taskChan)
+
+		rows, err := d.db.Query(`
+			SELECT id, object_hash, step_id, input_task_id, processed 
+			FROM task 
+			WHERE step_id = ?
+			ORDER BY id
+		`, stepID)
+		if err != nil {
+			panic(err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var t Task
+			if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed); err != nil {
+				panic(err)
+			}
+			taskChan <- t
+		}
+
+		if err := rows.Err(); err != nil {
+			panic(err)
+		}
+	}()
+
+	return taskChan
+}
+
+func (d Database) GetUnprocessedTasks(stepID int64) chan Task {
+	taskChan := make(chan Task)
+
+	go func() {
+		defer close(taskChan)
+
+		rows, err := d.db.Query(`
+			SELECT id, object_hash, step_id, input_task_id, processed 
+			FROM task 
+			WHERE step_id = ? 
+			  AND id NOT IN (SELECT DISTINCT input_task_id FROM task WHERE input_task_id IS NOT NULL)
+			ORDER BY id
+		`, stepID)
+		if err != nil {
+			panic(err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var t Task
+			if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed); err != nil {
+				panic(err)
+			}
+			taskChan <- t
+		}
+
+		if err := rows.Err(); err != nil {
+			panic(err)
+		}
+	}()
+
+	return taskChan
+}
+
+func (d Database) GetNextTasks(taskID int64) chan Task {
+	taskChan := make(chan Task)
+
+	go func() {
+		defer close(taskChan)
+
+		rows, err := d.db.Query(`
+			SELECT id, object_hash, step_id, input_task_id, processed 
+			FROM task 
+			WHERE input_task_id = ?
+			ORDER BY id
+		`, taskID)
+		if err != nil {
+			panic(err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var t Task
+			if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed); err != nil {
+				panic(err)
+			}
+			taskChan <- t
+		}
+
+		if err := rows.Err(); err != nil {
+			panic(err)
+		}
+	}()
+
+	return taskChan
+}
+
+func (d Database) IsTaskCompletedInNextStep(nextStepID, taskID int64) (bool, error) {
+	var completed bool
+	err := d.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM task 
+			WHERE step_id = ? AND input_task_id = ? AND processed = 1
+		)
+	`, nextStepID, taskID).Scan(&completed)
+	return completed, err
+}
+
+// Utility functions
 
 func (d Database) GetObjectPath(hash string) string {
 	dir := fmt.Sprintf(
@@ -176,142 +415,4 @@ func (d Database) GetObjectPath(hash string) string {
 	}
 
 	return fmt.Sprintf("%s/%s", dir, hash[6:])
-}
-
-func (d Database) InsertTask(objectHash string, stepID *int64, inputTaskID *int64) (int64, bool, error) {
-	res, err := d.db.Exec(`
-INSERT OR IGNORE INTO task (object_hash, step_id, input_task_id, processed)
-VALUES (?, ?, ?, 0);
-`, objectHash, stepID, inputTaskID)
-	if err != nil {
-		return 0, false, err
-	}
-
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return 0, false, err
-	}
-
-	if rowsAffected > 0 {
-		id, err := res.LastInsertId()
-		return id, true, err
-	}
-
-	// Already exists, get the ID
-	var id int64
-	err = d.db.QueryRow(`
-		SELECT id FROM task 
-		WHERE object_hash = ? AND step_id IS ? AND input_task_id IS ?
-	`, objectHash, stepID, inputTaskID).Scan(&id)
-	return id, false, err
-}
-
-func (d Database) GetUnprocessedTasks() ([]Task, error) {
-	rows, err := d.db.Query(`
-		SELECT t.id, t.object_hash, t.step_id, t.input_task_id
-		FROM task t
-		WHERE t.processed = 0 AND t.step_id IS NOT NULL
-		ORDER BY t.id
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tasks []Task
-	for rows.Next() {
-		var t Task
-		var inputID sql.NullInt64
-		err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &inputID)
-		if err != nil {
-			return nil, err
-		}
-		if inputID.Valid {
-			val := inputID.Int64
-			t.InputTaskID = &val
-		}
-		tasks = append(tasks, t)
-	}
-
-	return tasks, rows.Err()
-}
-
-func (d Database) MarkTaskProcessed(taskID int64) error {
-	_, err := d.db.Exec("UPDATE task SET processed = 1 WHERE id = ?", taskID)
-	return err
-}
-
-func (d Database) GetTasksByStepName(name string, mode string) ([]Task, error) {
-	var query string
-	if mode == "input" {
-		query = `
-			SELECT t.id, t.object_hash, t.step_id, t.input_task_id, t.processed
-			FROM task t
-			JOIN step s ON t.step_id = s.id
-			WHERE s.name = ?
-			ORDER BY t.id
-		`
-	} else {
-		// output mode - get tasks created by this step
-		query = `
-			SELECT t2.id, t2.object_hash, t2.step_id, t2.input_task_id, t2.processed
-			FROM task t1
-			JOIN step s ON t1.step_id = s.id
-			JOIN task t2 ON t2.input_task_id = t1.id
-			WHERE s.name = ?
-			ORDER BY t2.id
-		`
-	}
-
-	rows, err := d.db.Query(query, name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tasks []Task
-	for rows.Next() {
-		var t Task
-		if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed); err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, t)
-	}
-
-	return tasks, rows.Err()
-}
-
-func (d Database) MarkStepTasksUnprocessed(stepName string) (int64, error) {
-	res, err := d.db.Exec(`
-		UPDATE task
-		SET processed = 0
-		WHERE step_id = (SELECT id FROM step WHERE name = ?)
-	`, stepName)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
-func (d Database) GetStartStep() (*Step, error) {
-	var step Step
-	var parallel sql.NullInt64
-	err := d.db.QueryRow("SELECT id, name, script, is_start, parallel FROM step WHERE is_start = 1 LIMIT 1").Scan(
-		&step.ID,
-		&step.Name,
-		&step.Script,
-		&step.IsStart,
-		&parallel,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if parallel.Valid {
-		val := int(parallel.Int64)
-		step.Parallel = &val
-	}
-	return &step, nil
 }
