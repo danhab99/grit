@@ -73,11 +73,13 @@ func (p *Pipeline) Execute(startStepName string, maxParallel int) int {
 					<-resourcePool // release immediately after task completes
 
 					for nextTask := range nextTasks {
-						nextStepInfo, err := db.GetStep(*nextTask.StepID)
-						if err != nil {
-							panic(err)
+						if nextTask.StepID != nil {
+							nextStepInfo, err := db.GetStep(*nextTask.StepID)
+							if err != nil {
+								panic(err)
+							}
+							msgBus[nextStepInfo.Name] <- nextTask
 						}
-						msgBus[nextStepInfo.Name] <- nextTask
 					}
 				}
 			}()
@@ -227,19 +229,22 @@ func (p Pipeline) ExecuteTask(t Task) chan Task {
 			stepName := extractStepName(filename)
 			filePath := fmt.Sprintf("%s/%s", outputDir, filename)
 
+			var isCompleted bool
+
 			nextStep, err := db.GetStepByName(stepName)
 			if err != nil {
 				panic(err)
 			}
+			if nextStep != nil {
+				isCompleted, err = db.IsTaskCompletedInNextStep(nextStep.ID, t.ID)
+				if err != nil {
+					panic(err)
+				}
 
-			isCompleted, err := db.IsTaskCompletedInNextStep(nextStep.ID, t.ID)
-			if err != nil {
-				panic(err)
-			}
-
-			if isCompleted {
-				fmt.Printf("This step is already completed %d\n", t.ID)
-				return
+				if isCompleted {
+					fmt.Printf("This step is already completed %d\n", t.ID)
+					return
+				}
 			}
 
 			runLogger.Printf("	Output: %s -> step '%s'", filename, stepName)
@@ -255,12 +260,16 @@ func (p Pipeline) ExecuteTask(t Task) chan Task {
 				inputTaskID = &t.ID
 			}
 
-			outputTasks <- Task{
+			t := Task{
 				ObjectHash:  hash,
-				StepID:      &nextStep.ID,
 				InputTaskID: inputTaskID,
 				Processed:   isCompleted,
 			}
+			if nextStep != nil {
+				t.StepID = &nextStep.ID
+			}
+
+			outputTasks <- t
 
 			objectPath := db.GetObjectPath(hash)
 			_, err = copyFileWithSHA256(filePath, objectPath)
@@ -268,7 +277,7 @@ func (p Pipeline) ExecuteTask(t Task) chan Task {
 				panic(err)
 			}
 
-			_, err = db.CreateTask(hash, &nextStep.ID, inputTaskID)
+			_, err = db.CreateTask(hash, t.StepID, inputTaskID)
 			if err != nil {
 				panic(err)
 			}
