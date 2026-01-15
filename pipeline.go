@@ -42,7 +42,7 @@ func (p *Pipeline) Execute(startStepName string, maxParallel int) int64 {
 
 	type ScheduledTask struct {
 		task Task
-		done chan any
+		done func()
 	}
 
 	scheduledTasks := make(chan ScheduledTask)
@@ -57,33 +57,21 @@ func (p *Pipeline) Execute(startStepName string, maxParallel int) int64 {
 			resourceMap[uTask.ID]++
 			id := *uTask.StepID
 
-			if stepsIndex[id].Parallel == nil {
+			if stepsIndex[id].Parallel == nil || resourceMap[id] <= *stepsIndex[id].Parallel {
 				doneChan := make(chan any)
 				go func() {
 					<-doneChan
-					resourceMap[*uTask.StepID]--
 				}()
 
 				pipelineLogger.Printf("Acquired lock for %d, %d\n", &uTask.StepID, uTask.ID)
 
 				scheduledTasks <- ScheduledTask{
 					task: uTask,
-					done: doneChan,
+					done: func() {
+						resourceMap[*uTask.StepID]--
+					},
 				}
-			} else if resourceMap[id] <= *stepsIndex[id].Parallel {
-				doneChan := make(chan any)
-				go func() {
-					<-doneChan
-					resourceMap[*uTask.StepID]--
-				}()
-
-				pipelineLogger.Printf("Acquired lock for %d, %d\n", &uTask.StepID, uTask.ID)
-
-				scheduledTasks <- ScheduledTask{
-					task: uTask,
-					done: doneChan,
-				}
-			}
+			} 
 		}
 	}()
 
