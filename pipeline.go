@@ -15,11 +15,12 @@ import (
 )
 
 type Pipeline struct {
-	db *Database
+	db           *Database
+	enabledSteps []Step
 }
 
-func NewPipeline(d *Database) Pipeline {
-	return Pipeline{d}
+func NewPipeline(d *Database, steps []Step) Pipeline {
+	return Pipeline{d, steps}
 }
 
 var pipelineLogger = log.New(os.Stderr, "[PIPELINE] ", log.Ldate|log.Ltime|log.Lmsgprefix)
@@ -305,6 +306,10 @@ func (p Pipeline) IterateUnprocessed() chan Task {
 	var tasksChans []chan Task
 
 	for step := range db.ListSteps() {
+		if !slices.Contains(p.enabledSteps, step) {
+			continue
+		}
+
 		c := db.GetUnprocessedTasks(step.ID)
 		tasksChans = append(tasksChans, c)
 	}
