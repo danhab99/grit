@@ -28,9 +28,10 @@ func main() {
 	db_path := flag.String("db", "./db", "database path")
 	parallel := flag.Int("parallel", runtime.NumCPU(), "number of processes to run in parallel")
 	exportName := flag.String("export", "", "export a specific step")
-	exportMode := flag.String("export-mode", "output", "export mode: 'input' or 'output' (default: output)")
+	inputPath := flag.String("input-path", "", "export outputs for a specific input path")
 	runPipeline := flag.Bool("run", false, "run the pipeline")
 	startStep := flag.String("start", "", "step to start from (optional, defaults to start step in manifest)")
+	runset := flag.String("runset", "", "categorize tasks into runset groups")
 
 	var enabledSteps stringSlice
 	flag.Var(&enabledSteps, "step", "steps to run")
@@ -52,7 +53,7 @@ func main() {
 	mainLogger.Printf("Loaded %d steps from manifest", len(manifest.Steps))
 
 	mainLogger.Printf("Initializing database at: %s", *db_path)
-	database, err := NewDatabase(*db_path)
+	database, err := NewDatabase(*db_path, *runset)
 	if err != nil {
 		panic(err)
 	}
@@ -60,6 +61,6 @@ func main() {
 	if *runPipeline {
 		run(manifest, database, *parallel, *startStep, enabledSteps)
 	} else if exportName != nil && *exportName != "" {
-		exportResults(database, *exportName, *exportMode)
+		exportResults(database, *exportName, *inputPath)
 	}
 }

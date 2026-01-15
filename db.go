@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS task (
   input_task_id    INTEGER,
   processed        INTEGER DEFAULT 0,
   error            TEXT,
+	runset           TEXT DEFAULT (CURRENT_TIMESTAMP),
 
   FOREIGN KEY(step_id) REFERENCES step(id),
   FOREIGN KEY(input_task_id) REFERENCES task(id),
@@ -43,6 +44,7 @@ CREATE INDEX IF NOT EXISTS idx_task_input ON task(input_task_id);
 type Database struct {
 	db        *sql.DB
 	repo_path string
+	runset    string
 }
 
 type Step struct {
@@ -78,7 +80,7 @@ func (t Task) String() string {
 		i = fmt.Sprintf("%d", *t.InputTaskID)
 	}
 
-	var e string 
+	var e string
 	if t.Error == nil {
 		e = "NIL"
 	} else {
@@ -88,7 +90,7 @@ func (t Task) String() string {
 	return fmt.Sprintf("Task(id=%d object_hash=%s step_id=%s input_task_id=%s processed=%v error=%s)", t.ID, t.ObjectHash, s, i, t.Processed, e)
 }
 
-func NewDatabase(repo_path string) (Database, error) {
+func NewDatabase(repo_path string, runset string) (Database, error) {
 	err := os.MkdirAll(repo_path, 0755)
 	if err != nil {
 		return Database{}, err
@@ -110,12 +112,32 @@ func NewDatabase(repo_path string) (Database, error) {
 		return Database{}, err
 	}
 
-	return Database{db, repo_path}, nil
+	return Database{db, repo_path, runset}, nil
 }
 
 // Step CRUD operations
 
 func (d Database) CreateStep(step Step) (int64, error) {
+	// Check if step exists first
+	existing, err := d.GetStepByName(step.Name)
+	if err != nil {
+		return 0, err
+	}
+	
+	if existing != nil {
+		// Step exists, update it and return existing ID
+		_, err = d.db.Exec(`
+UPDATE step 
+SET script = ?, is_start = ?, parallel = ?, processed = ?
+WHERE id = ?
+`, step.Script, step.IsStart, step.Parallel, step.Processed, existing.ID)
+		if err != nil {
+			return 0, err
+		}
+		return existing.ID, nil
+	}
+	
+	// Step doesn't exist, create it
 	res, err := d.db.Exec(`
 INSERT INTO step (name, script, is_start, parallel, processed)
 VALUES (?, ?, ?, ?, ?)
@@ -246,9 +268,9 @@ func (d Database) ListSteps() chan Step {
 
 func (d Database) CreateTask(task Task) (int64, error) {
 	res, err := d.db.Exec(`
-INSERT OR IGNORE INTO task (object_hash, step_id, input_task_id, processed, error)
-VALUES (?, ?, ?, ?, ?);
-`, task.ObjectHash, task.StepID, task.InputTaskID, task.Processed, task.Error)
+INSERT OR IGNORE INTO task (object_hash, step_id, input_task_id, processed, error, runset)
+VALUES (?, ?, ?, ?, ?, ?);
+`, task.ObjectHash, task.StepID, task.InputTaskID, task.Processed, task.Error, d.runset)
 	if err != nil {
 		return 0, err
 	}
@@ -544,4 +566,13 @@ func (d Database) GetObjectPath(hash string) string {
 	}
 
 	return fmt.Sprintf("%s/%s", dir, hash[6:])
+}
+
+func (d *Database) CreateAndGetTask(t Task) (*Task, error) {
+	taskId, err := d.CreateTask(t)
+	if err != nil {
+		return nil, err
+	}
+
+	return d.GetTask(taskId)
 }
