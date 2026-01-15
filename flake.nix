@@ -22,6 +22,7 @@
               gopls
               delve
               sqlite
+              sqlite-web
               texliveTeTeX
               pandoc
             ];
