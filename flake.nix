@@ -14,22 +14,17 @@
         lib = pkgs.lib;
 
       in {
-        devShells = {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
-              gnumake
-              go
-              gopls
-              delve
-              sqlite
-              sqlite-web
-              texliveTeTeX
-              pandoc
-            ];
+        packages = {
+          default = pkgs.buildGoModule {
+            pname = "task-pipeline";
+            version = "0.1.0";
+            src = self;
+            vendorHash = "sha256-lyPVR2ZXBaelbsk/zNxjxgOnrKMUm8shdXW7mXU4ndM=";
+            subPackages = [ "." ];
 
-            GO_PATH="${self.outPath}/.go";
-            CGO_CFLAGS="-U_FORTIFY_SOURCE";
-            CGO_CPPFLAGS="-U_FORTIFY_SOURCE";
+            GO_PATH = "${self.outPath}/.go";
+            CGO_CFLAGS = "-U_FORTIFY_SOURCE";
+            CGO_CPPFLAGS = "-U_FORTIFY_SOURCE";
           };
         };
       });

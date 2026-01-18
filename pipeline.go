@@ -8,7 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	// "slices"
+
 	"sync"
 
 	"github.com/danhab99/idk/chans"

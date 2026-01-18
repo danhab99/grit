@@ -2,6 +2,56 @@
 
 A Go-based task pipeline system that executes shell scripts in a managed workflow with persistent state tracking.
 
+## Quick Start
+
+### Build
+```bash
+go build -o task-pipeline
+```
+
+### Run a Pipeline
+```bash
+./task-pipeline -manifest workflow.toml -db ./my-pipeline-db -run
+```
+
+### Create a Manifest (workflow.toml)
+```toml
+[[step]]
+name = "start"
+start = true
+script = '''
+echo "Input data" > $OUTPUT_DIR/process
+echo "More data" > $OUTPUT_DIR/transform
+'''
+
+[[step]]
+name = "process"
+script = '''
+cat $INPUT_FILE | tr '[:lower:]' '[:upper:]' > $OUTPUT_DIR/next
+'''
+
+[[step]]
+name = "transform"
+script = '''
+cat $INPUT_FILE | sort > $OUTPUT_DIR/next
+'''
+```
+
+### Common Commands
+```bash
+# Run the pipeline
+./task-pipeline -manifest manifest.toml --db ./db -run
+
+# Detect and migrate tainted steps (when a step's script changes)
+./task-pipeline -manifest manifest.toml --db ./db -migrate-tainted
+
+# Run with parallel limit
+./task-pipeline -manifest manifest.toml --db ./db -run -parallel 4
+
+# Specify starting step
+./task-pipeline -manifest manifest.toml --db ./db -run -start process_name
+```
+
 ## Overview
 
 Task Pipeline is a workflow automation tool that:
@@ -10,6 +60,7 @@ Task Pipeline is a workflow automation tool that:
 - Manages task inputs/outputs through a content-addressable object store
 - Supports task chaining and dependencies through step linking
 - Processes multiple task streams concurrently
+- Automatically detects and handles step versioning/tainted steps
 
 ## Architecture
 
@@ -24,156 +75,200 @@ Entry point that:
 - Merges task streams and executes steps
 
 ### 2. **Manifest (`manifest.go`)**
-Defines the task structure from TOML configuration files.
+Defines the step structure from TOML configuration files.
 
 ### 3. **Database (`db.go`)**
 Manages persistent storage with:
-- **Tasks table**: Stores task definitions (name, script)
-- **Steps table**: Tracks individual task executions with content hashes
-- **Step links table**: Manages dependencies between steps
+- **Steps table**: Stores step definitions (name, script, version)
+- **Tasks table**: Tracks individual task executions with content hashes and processing status
 - **Object store**: Content-addressable storage using SHA-256 hashes
+- **Step versioning**: Automatically tracks script changes as new versions
 
 The object store uses a sharded directory structure: `objects/AB/CD/EFGH...` where `ABCDEFGH...` is the full hash.
 
-### 4. **Executor (`run.go`)**
-Runs individual steps by:
+### 4. **Executor (`pipeline.go`)**
+Runs individual tasks by:
 - Writing input objects to temporary files
-- Executing the task's shell script with environment variables
+- Executing the step's shell script with environment variables
 - Reading output files from a designated directory
-- Inserting new steps into the database for downstream processing
+- Creating new tasks in the database for downstream steps
+- Handling step versioning and tainted task migration
 
 ## Usage
 
 ```bash
-task-pipeline -manifest <path-to-manifest.toml> -db <database-directory>
+task-pipeline -manifest <path-to-manifest.toml> -db <database-directory> [options]
 ```
 
 ### Command-Line Flags
 
-- `-manifest` (required): Path to the TOML manifest file defining tasks
+- `-manifest` (required): Path to the TOML manifest file defining steps
 - `-db` (default: `./db`): Directory for database and object storage
+- `-run`: Execute the pipeline
+- `-migrate-tainted`: Detect steps with changed scripts and migrate their tasks to new versions
+- `-parallel` (default: number of CPUs): Maximum concurrent tasks to execute
+- `-start`: Name of the step to start from (defaults to step with `start=true`)
 
 ### Manifest Format
 
-Create a TOML file with task definitions:
+Create a TOML file with step definitions:
 
 ```toml
-[[task]]
-name = "process-data"
+[[step]]
+name = "extract"
+start = true
 script = """
-#!/bin/bash
-cat $INPUT_FILE | process-tool > $OUTPUT_DIR/result.txt
+# Initial step - generates output files
+curl https://api.example.com/data > $OUTPUT_DIR/data
 """
 
-[[task]]
+[[step]]
+name = "process"
+script = """
+# Process the data and generate output
+process-tool < $INPUT_FILE > $OUTPUT_DIR/result
+"""
+
+[[step]]
 name = "transform"
 script = """
-#!/bin/bash
-transform-tool < $INPUT_FILE > $OUTPUT_DIR/transformed.json
+# Transform and output to next step
+transform-tool < $INPUT_FILE > $OUTPUT_DIR/final
 """
 ```
 
 ### Environment Variables for Scripts
 
-Each task script receives:
-- `INPUT_FILE`: Path to the input file (previous step's output or initial input)
+Each step script receives:
+- `INPUT_FILE`: Path to the input file (previous step's output or empty for start step)
 - `OUTPUT_DIR`: Directory where the script should write output files
 
-## How It Works
+Output filenames determine which step processes them next. For example:
+- `result_next.txt` → routes to `next` step
+- `final_transform.txt` → routes to `transform` step
+- `done.txt` → final output (no further processing)
 
-1. **Initialization**: Loads manifest and initializes SQLite database with schema
-2. **Task Registration**: Registers each task from the manifest
-3. **Step Iteration**: Queries for unprocessed steps (leaf nodes in the dependency graph)
-4. **Concurrent Processing**: Merges multiple task channels and processes steps as they become available
-5. **Execution**: For each step:
-   - Writes input object to temporary file
-   - Executes shell script with environment variables
-   - Collects output files from output directory
-   - Inserts new steps with output objects, creating dependencies
-6. **Continuation**: New steps are queued for processing, enabling pipeline progression
+## Step Versioning & Tainted Steps
+
+When you modify a step's script in your manifest and run it again, Task Pipeline:
+
+1. Detects the script change and creates a new step version
+2. Identifies "tainted" tasks (those running the old script)
+3. Can automatically migrate and reprocess them with the new script
+
+### Workflow
+```bash
+# Initial run
+./task-pipeline -manifest workflow.toml --db ./db -run
+
+# Edit workflow.toml - change a step's script
+
+# Detect and migrate tainted steps
+./task-pipeline -manifest workflow.toml --db ./db -migrate-tainted
+
+# Run again - reprocesses with new script
+./task-pipeline -manifest workflow.toml --db ./db -run
+```
+
+Old tasks are preserved as historical records while new tasks reprocess with the updated logic.
 
 ## Database Schema
 
 ### Tables
 
-- **task**: Task definitions
+- **step**: Step definitions and versions
   - `id`: Auto-increment primary key
-  - `name`: Unique task name
+  - `name`: Step name
   - `script`: Shell script to execute
+  - `version`: Auto-incrementing version when script changes
+  - `is_start`: Whether this is the starting step
+  - `parallel`: Maximum parallel execution limit
 
-- **step**: Execution instances
+- **task**: Task execution instances
   - `id`: Auto-increment primary key
-  - `object_hash`: SHA-256 hash of the output object
-  - `task`: Foreign key to task table
-
-- **step_link**: Task dependencies
-  - `from_step_id`: Source step
-  - `to_step_id`: Destination step
-  - Composite primary key ensures unique links
+  - `object_hash`: SHA-256 hash of the input object
+  - `step_id`: Foreign key to step table
+  - `input_task_id`: Foreign key linking to parent task
+  - `processed`: 0/1 flag for completion status
+  - `error`: Error message if task failed
+  - `runset`: Timestamp grouping related tasks
 
 ### Indexes
 
-- `idx_task_name`: Fast task lookup by name
-- `idx_step_task`: Efficient step filtering by task
-- `idx_step_link_from`: Quick dependency traversal
+- `idx_step_name`: Fast step lookup by name
+- `idx_task_step`: Efficient task filtering by step
+- `idx_task_processed`: Quick filtering of unprocessed tasks
+- `idx_task_input`: Find downstream tasks by input task ID
 
 ## Features
 
 - **Content-Addressable Storage**: Deduplicates outputs using SHA-256 hashing
 - **Concurrent Processing**: Handles multiple task streams simultaneously
 - **Persistent State**: Maintains execution history in SQLite
-- **Dependency Management**: Links steps to form execution chains
+- **Step Versioning**: Automatically tracks script changes
+- **Tainted Step Migration**: Detects and reprocesses tasks when steps change
+- **Dependency Management**: Links tasks through input/output relationships
 - **WAL Mode**: Enables concurrent reads/writes to the database
 - **Shell Script Flexibility**: Execute any shell command or script
 
 ## Dependencies
 
 - `github.com/danhab99/idk/chans`: Channel utilities for stream merging
+- `github.com/danhab99/idk/workers`: Worker pool for parallel processing
 - `github.com/pelletier/go-toml`: TOML parsing
 - `database/sql`: SQLite database access
+- `github.com/mattn/go-sqlite3`: SQLite driver
 - Standard Go libraries
-
-## Building
-
-```bash
-go build -o task-pipeline
-```
 
 ## Example Workflow
 
 1. Create a manifest file `workflow.toml`:
 ```toml
-[[task]]
+[[step]]
 name = "fetch"
-script = "curl -o $OUTPUT_DIR/data.json https://api.example.com/data"
+start = true
+script = "echo 'sample data' > $OUTPUT_DIR/process"
 
-[[task]]
+[[step]]
 name = "process"
-script = "jq '.items[]' < $INPUT_FILE > $OUTPUT_DIR/processed.json"
+script = "tr '[:lower:]' '[:upper:]' < $INPUT_FILE > $OUTPUT_DIR/done"
 ```
 
 2. Run the pipeline:
 ```bash
-./task-pipeline -manifest workflow.toml -db ./my-pipeline-db
+./task-pipeline -manifest workflow.toml -db ./my-db -run
 ```
 
-3. Monitor execution through printed logs showing:
-   - Tasks being registered
-   - Steps being executed
-   - Output files being generated
-   - Database operations
+3. Modify the process step in workflow.toml:
+```toml
+[[step]]
+name = "process"
+script = "tr '[:lower:]' '[:upper:]' < $INPUT_FILE | sort > $OUTPUT_DIR/done"
+```
+
+4. Migrate tainted tasks:
+```bash
+./task-pipeline -manifest workflow.toml -db ./my-db -migrate-tainted
+```
+
+5. Run again to reprocess with new logic:
+```bash
+./task-pipeline -manifest workflow.toml -db ./my-db -run
+```
 
 ## Output
 
 The program prints detailed logs during execution:
-- Manifest loading and task count
+- Manifest loading and step count
 - Database initialization
-- Task registration
-- Step execution with IDs and task names
+- Tainted step detection and migration counts
+- Step execution with IDs and step names
 - Script execution details
-- Output file generation counts
+- Output file generation
+- Task processing counts
 - Total steps processed
 
 ## License
 
 [Add your license here]
+
