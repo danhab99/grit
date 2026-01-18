@@ -317,15 +317,20 @@ func (p Pipeline) ExecuteStep(s Step) int64 {
 	// Create progress bar
 	bar := NewProgressBar(numberOfUnprocessedTasks, fmt.Sprintf("  Processing %s", s.Name))
 
-	for task := range db.GetUnprocessedTasks(s.ID) {
+	par := s.Parallel
+	if par == nil {
+		x := runtime.NumCPU()
+		par = &x
+	}
+	workers.Parallel0(db.GetUnprocessedTasks(s.ID), int(*par), func(task Task) {
 		if task.Processed {
-			continue
+			return
 		}
 
 		p.ExecuteTask(task)
 		numberOfExecutions++
 		bar.Add(1)
-	}
+	})
 
 	bar.Finish()
 
