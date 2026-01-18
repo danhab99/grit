@@ -35,6 +35,8 @@
             delve
             sqlite
             sqlite-web
+            pandoc
+            texliveFull
           ];
 
           shellHook = ''
