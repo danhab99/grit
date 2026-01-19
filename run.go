@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"slices"
 
 	"github.com/fatih/color"
 )
@@ -42,7 +43,17 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 			panic(err)
 		}
 		s.ID = id
-		es = append(es, s)
+
+		if len(enabledSteps) > 0 {
+			if slices.ContainsFunc(enabledSteps, func(stepName string) bool {
+				return stepName == step.Name
+			}) {
+				es = append(es, s)
+				database.MarkStepTasksUnprocessed(s.ID)
+			}
+		} else {
+			es = append(es, s)
+		}
 	}
 
 	runLogger.Printf("Registered %d steps", len(manifest.Steps))

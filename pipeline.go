@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 
 	"sync"
 
@@ -32,21 +33,17 @@ func (p *Pipeline) Execute(startStepName string, maxParallel int) int64 {
 	steps := <-chans.Accumulate(db.ListSteps())
 	stepsIndex := make(map[int64]Step)
 	for _, s := range steps {
-		// if s.IsStart {
-		// 	continue
-		// }
-		// if slices.ContainsFunc(p.enabledSteps, func(e Step) bool {
-		// 	return s.Name == e.Name
-		// }) {
-		// 	continue
-		// }
-		// if s.Processed {
-		// 	continue
-		// }
-		stepsIndex[s.ID] = s
+		if len(p.enabledSteps) > 0 {
+			if slices.ContainsFunc(p.enabledSteps, func(step Step) bool {
+				return s.Name == step.Name
+			}) {
+				stepsIndex[s.ID] = s
+			}
+		} else {
+			stepsIndex[s.ID] = s
+		}
 	}
 
-	// runtime.Breakpoint()
 	p.Seed()
 
 	for _, step := range stepsIndex {
