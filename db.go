@@ -352,6 +352,57 @@ VALUES (?, ?, ?, ?, ?, ?);
 	return id, nil
 }
 
+func (d Database) BatchInsertTasks(tasks []Task) ([]Task, error) {
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+	INSERT OR IGNORE INTO task (object_hash, step_id, input_task_id, processed, error, runset)
+	VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	for i, task := range tasks {
+		p := 0
+		if task.Processed {
+			p = 1
+		}
+		res, err := stmt.Exec(task.ObjectHash, task.StepID, task.InputTaskID, p, task.Error, d.runset)
+		if err != nil {
+			return nil, err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		// If the row was ignored (already exists), fetch the existing id
+		if id == 0 {
+			row := tx.QueryRow(`SELECT id FROM task WHERE object_hash = ? AND step_id = ? AND input_task_id IS ? AND runset = ?`,
+				task.ObjectHash, task.StepID, task.InputTaskID, d.runset)
+			err := row.Scan(&id)
+			if err != nil {
+				return nil, err
+			}
+		}
+		tasks[i].ID = int64(id)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return tasks, nil
+}
+
 func (d Database) GetTask(id int64) (*Task, error) {
 	var t Task
 	err := d.db.QueryRow("SELECT id, object_hash, step_id, input_task_id, processed, error FROM task WHERE id = ?", id).Scan(
