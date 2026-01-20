@@ -125,6 +125,18 @@ func (d Database) CreateStep(step Step) (int64, error) {
 	err := d.db.QueryRow("SELECT id FROM step WHERE name = ? AND script = ? LIMIT 1", step.Name, step.Script).Scan(&existingID)
 	if err == nil {
 		// Step with same name and script exists, return its ID
+
+		s := 0
+		if step.IsStart {
+			s = 1
+		}
+
+
+		err := d.db.QueryRow("UPDATE step SET parallel = ?, is_start = ? WHERE id = ?", step.Parallel, s, existingID).Err()
+		if err != nil {
+			panic(err)
+		}
+
 		return existingID, nil
 	}
 	if err != sql.ErrNoRows {
@@ -568,6 +580,22 @@ func (d Database) CountUnprocessedTasksForStep(stepID int64) (int64, error) {
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+// GetTaskCountsForStep returns (total tasks, processed tasks) for a given step
+func (d Database) GetTaskCountsForStep(stepID int64) (int64, int64, error) {
+	totalTasks, err := d.CountTasksForStep(stepID)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	unprocessedTasks, err := d.CountUnprocessedTasksForStep(stepID)
+	if err != nil {
+		return totalTasks, 0, err
+	}
+
+	processedTasks := totalTasks - unprocessedTasks
+	return totalTasks, processedTasks, nil
 }
 
 func (d Database) IsStepComplete(stepID int64) (bool, error) {

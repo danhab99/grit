@@ -301,9 +301,20 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 		return 0
 	}
 
-	// Create progress bar
-	bar := NewProgressBar(numberOfUnprocessedTasks, fmt.Sprintf("  Processing %s", s.Name))
+	// Count total tasks and already-processed tasks for this step
+	totalTasks, processedTasks, err := db.GetTaskCountsForStep(s.ID)
+	if err != nil {
+		pipelineLogger.Errorf("Failed to get task counts: %v", err)
+		return 0
+	}
 
+	// Create progress bar with total tasks (not just unprocessed)
+	bar := NewProgressBar(totalTasks, fmt.Sprintf("  Processing %s", s.Name))
+
+	// Set progress bar to already-processed count
+	if processedTasks > 0 {
+		bar.Set(int(processedTasks))
+	}
 
 	par := s.Parallel
 	if par == nil {
@@ -322,7 +333,7 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 	bar.Finish()
 
 	pipelineLogger.Successf("  Step '%s' complete: %d/%d tasks", s.Name, numberOfExecutions, numberOfUnprocessedTasks)
-	err := db.UpdateStepStatus(s.ID, true)
+	err = db.UpdateStepStatus(s.ID, true)
 	if err != nil {
 		panic(err)
 	}
