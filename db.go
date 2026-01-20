@@ -129,6 +129,7 @@ func (d Database) CreateStep(step Step) (int64, error) {
 			s = 1
 		}
 
+
 		err := d.db.QueryRow("UPDATE step SET parallel = ?, is_start = ? WHERE id = ?", step.Parallel, s, existingID).Err()
 		if err != nil {
 			panic(err)
@@ -154,7 +155,7 @@ func (d Database) CreateStep(step Step) (int64, error) {
 
 	res, err := d.db.Exec(`
 INSERT INTO step (name, script, is_start, parallel, version)
-VALUES (?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?)
 `, step.Name, step.Script, step.IsStart, step.Parallel, version)
 	if err != nil {
 		return 0, err
@@ -222,6 +223,11 @@ func (d Database) GetStartingStep() (*Step, error) {
 func (d Database) DeleteStep(id int64) error {
 	_, err := d.db.Exec("DELETE FROM step WHERE id = ?", id)
 	return err
+}
+
+func (d Database) UpdateStepStatus(id int64, processed bool) error {
+	// No-op: step processed status is no longer tracked
+	return nil
 }
 
 func (d Database) CountSteps() (int64, error) {
@@ -359,7 +365,7 @@ func (d Database) BatchInsertTasks(tasks []Task) ([]Task, error) {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-	INSERT OR IGNORE INTO task (object_hash, step_id, input_task_id, error, runset)
+	INSERT OR IGNORE INTO task (object_hash, step_id, input_task_id, processed, error, runset)
 	VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, err
@@ -367,7 +373,11 @@ func (d Database) BatchInsertTasks(tasks []Task) ([]Task, error) {
 	defer stmt.Close()
 
 	for i, task := range tasks {
-		res, err := stmt.Exec(task.ObjectHash, task.StepID, task.InputTaskID, task.Error, d.runset)
+		p := 0
+		if task.Processed {
+			p = 1
+		}
+		res, err := stmt.Exec(task.ObjectHash, task.StepID, task.InputTaskID, p, task.Error, d.runset)
 		if err != nil {
 			return nil, err
 		}
@@ -585,13 +595,34 @@ func (d Database) IsStepComplete(stepID int64) (bool, error) {
 	return count == 0, nil
 }
 
-func (d Database) AreAllStepsComplete() (bool, error) {
-	var incompleteCount int64
-	err := d.db.QueryRow("SELECT COUNT(*) FROM step WHERE processed = 0").Scan(&incompleteCount)
+func (d Database) CheckAndMarkStepComplete(stepID int64) (bool, error) {
+	isComplete, err := d.IsStepComplete(stepID)
 	if err != nil {
 		return false, err
 	}
-	return incompleteCount == 0, nil
+
+	if isComplete {
+		step, err := d.GetStep(stepID)
+		if err != nil {
+			return false, err
+		}
+
+		// Only mark as processed if it wasn't already
+		if step != nil {
+			err = d.UpdateStepStatus(stepID, true)
+			if err != nil {
+				return false, err
+			}
+			dbLogger.Printf("Step %d (%s) marked as complete", stepID, step.Name)
+		}
+	}
+
+	return isComplete, nil
+}
+
+func (d Database) AreAllStepsComplete() (bool, error) {
+	// Step completion is no longer tracked, always return true
+	return true, nil
 }
 
 func (d Database) GetPipelineStatus() (complete bool, totalTasks int64, processedTasks int64, err error) {

@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-
 	"sync"
+	"time"
 
 	"github.com/danhab99/idk/chans"
 	"github.com/danhab99/idk/workers"
@@ -61,8 +61,7 @@ func (p Pipeline) ExecuteTask(t Task) {
 		panic(err)
 	}
 
-	color.New(color.FgMagenta).Fprintf(os.Stderr, "  → ")
-	pipelineLogger.Printf("Task %d | Step: %s", t.ID, color.New(color.FgMagenta, color.Bold).Sprint(step.Name))
+	t.Processed = true
 
 	inputFile, err := os.CreateTemp("/tmp", "input-*")
 	if err != nil {
@@ -138,6 +137,12 @@ func (p Pipeline) ExecuteTask(t Task) {
 
 	if err := cmd.Wait(); err != nil {
 		pipelineLogger.Errorf("    Error executing script: %v", err)
+	}
+
+	// runtime.Breakpoint()
+	err = db.UpdateStepStatus(t.ID, true)
+	if err != nil {
+		panic(err)
 	}
 
 	entries, err := os.ReadDir(outputDir)
@@ -266,6 +271,10 @@ func (p Pipeline) Seed() {
 		p.ExecuteTask(*startTask)
 	}
 
+	err = db.UpdateStepStatus(startStep.ID, true)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
@@ -289,10 +298,25 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 		return 0
 	}
 
+	// Count total tasks and already-processed tasks for this step
+	totalTasks, processedTasks, err := db.GetTaskCountsForStep(s.ID)
+	if err != nil {
+		pipelineLogger.Errorf("Failed to get task counts: %v", err)
+		return 0
+	}
+
+	pipelineLogger.Printf("  %s: Starting (%d/%d already completed)", s.Name, processedTasks, totalTasks)
+
 	par := s.Parallel
 	if par == nil {
 		par = &maxParallel
 	}
+
+	// Simple progress tracking without progress bar
+	var completedCount int64
+	var mu sync.Mutex
+	lastPrint := time.Now()
+
 	workers.Parallel0(db.GetUnprocessedTasks(s.ID), *par, func(task Task) {
 		if task.Processed {
 			return
@@ -300,9 +324,26 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 
 		p.ExecuteTask(task)
 		numberOfExecutions++
+
+		mu.Lock()
+		completedCount++
+		elapsed := time.Since(lastPrint)
+		// Print progress update every 2 seconds or every 100 tasks
+		if elapsed > 2*time.Second || completedCount%100 == 0 {
+			pipelineLogger.Printf("  %s: %d/%d tasks completed", s.Name, completedCount, numberOfUnprocessedTasks)
+			lastPrint = time.Now()
+		}
+		mu.Unlock()
 	})
 
+	// Print final status
+	pipelineLogger.Printf("  %s: %d/%d tasks completed", s.Name, completedCount, numberOfUnprocessedTasks)
+
 	pipelineLogger.Successf("  Step '%s' complete: %d/%d tasks", s.Name, numberOfExecutions, numberOfUnprocessedTasks)
+	err = db.UpdateStepStatus(s.ID, true)
+	if err != nil {
+		panic(err)
+	}
 
 	return numberOfExecutions
 }
