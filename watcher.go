@@ -17,15 +17,16 @@ import (
 var watcherLogger = NewColorLogger("[WATCHER] ", color.New(color.FgBlue, color.Bold))
 
 type OutputWatcher struct {
-	db       *Database
-	task     Task
-	pipeline *Pipeline
-	watcher  *fsnotify.Watcher
-	wg       sync.WaitGroup
-	done     chan struct{}
-	mu       sync.Mutex
-	seen     map[string]bool
-	stopOnce sync.Once
+	db           *Database
+	task         Task
+	pipeline     *Pipeline
+	watcher      *fsnotify.Watcher
+	wg           sync.WaitGroup
+	done         chan struct{}
+	mu           sync.Mutex
+	seen         map[string]bool
+	stopOnce     sync.Once
+	tasksCreated int64
 }
 
 func NewOutputWatcher(db *Database, task Task, pipeline *Pipeline) (*OutputWatcher, error) {
@@ -114,7 +115,7 @@ func (w *OutputWatcher) processFile(filePath string) {
 		return
 	}
 	defer os.RemoveAll(tempDir)
-	
+
 	tempPath := filepath.Join(tempDir, filepath.Base(filePath))
 	tempFile, err := os.Create(tempPath)
 	if err != nil {
@@ -227,6 +228,10 @@ func (w *OutputWatcher) processFile(filePath string) {
 		return
 	}
 
+	w.mu.Lock()
+	w.tasksCreated++
+	w.mu.Unlock()
+
 	watcherLogger.Verbosef("Created task for %s in step %s", hash[:16]+"...", stepName)
 }
 
@@ -235,6 +240,9 @@ func (w *OutputWatcher) Stop() {
 		close(w.done)
 		w.watcher.Close()
 		w.wg.Wait()
-		watcherLogger.Verbosef("Watcher stopped")
+		w.mu.Lock()
+		tasksCreatedCount := w.tasksCreated
+		w.mu.Unlock()
+		watcherLogger.Verbosef("Watcher stopped (created %d tasks)", tasksCreatedCount)
 	})
 }

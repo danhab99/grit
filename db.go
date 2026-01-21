@@ -667,6 +667,10 @@ func (d Database) GetUnprocessedTasks(stepID int64) chan Task {
 
 	go func() {
 		defer close(taskChan)
+		var taskCount int64 = 0
+		defer func() {
+			dbLogger.Printf("GetUnprocessedTasks(step=%d) found %d unprocessed tasks", stepID, taskCount)
+		}()
 
 		rows, err := d.db.Query(`
 			SELECT id, object_hash, step_id, input_task_id, processed, error 
@@ -693,6 +697,7 @@ func (d Database) GetUnprocessedTasks(stepID int64) chan Task {
 				dbLogger.Printf("Error scanning task for step %d: %v", stepID, err)
 				return
 			}
+			taskCount++
 			taskChan <- t
 		}
 

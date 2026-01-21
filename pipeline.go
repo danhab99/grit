@@ -149,6 +149,7 @@ func (p Pipeline) ExecuteTask(t Task) {
 
 	if err := cmd.Wait(); err != nil {
 		pipelineLogger.Errorf("    Error executing script: %v", err)
+		panic(err)
 	}
 
 	// Stop watcher to ensure all files are processed
@@ -197,15 +198,18 @@ func (p Pipeline) Seed() {
 		panic("start step cannot be nil")
 	}
 
-	processedTaskCount := 0
-
-	for task := range db.GetTasksForStep(startStep.ID) {
-		if task.Processed {
-			processedTaskCount++
-		}
+	// Try to find an unprocessed task first
+	var unprocessedTask *Task
+	for task := range db.GetUnprocessedTasks(startStep.ID) {
+		unprocessedTask = &task
+		break
 	}
 
-	if processedTaskCount == 0 {
+	if unprocessedTask != nil {
+		// Execute existing unprocessed task
+		p.ExecuteTask(*unprocessedTask)
+	} else {
+		// No unprocessed tasks, create a new one
 		prestartTask := Task{
 			StepID: &startStep.ID,
 		}
@@ -216,6 +220,9 @@ func (p Pipeline) Seed() {
 		}
 
 		startTask, err := db.GetTask(startTaskId)
+		if err != nil {
+			panic(err)
+		}
 		p.ExecuteTask(*startTask)
 	}
 
@@ -230,7 +237,8 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 
 	// Force save WAL before executing step
 	if err := db.ForceSaveWAL(); err != nil {
-		pipelineLogger.Warnf("Failed to checkpoint WAL before step '%s': %v", s.Name, err)
+		pipelineLogger.Errorf("Failed to checkpoint WAL before step '%s': %v", s.Name, err)
+		panic(err)
 	}
 
 	color.New(color.FgCyan, color.Bold).Fprintf(os.Stderr, "\n▶ ")
@@ -239,12 +247,15 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 	numberOfExecutions := int64(0)
 	numberOfUnprocessedTasks := int64(0)
 
-	// Count unprocessed tasks first
+	// Get unprocessed tasks channel once and collect them
+	unprocessedTasksList := []Task{}
 	for task := range db.GetUnprocessedTasks(s.ID) {
 		if !task.Processed {
 			numberOfUnprocessedTasks++
+			unprocessedTasksList = append(unprocessedTasksList, task)
 		}
 	}
+	pipelineLogger.Verbosef("  Collected %d unprocessed tasks for step '%s'", numberOfUnprocessedTasks, s.Name)
 
 	if numberOfUnprocessedTasks == 0 {
 		pipelineLogger.Verbosef("  No unprocessed tasks for step '%s'", s.Name)
@@ -255,7 +266,7 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 	totalTasks, processedTasks, err := db.GetTaskCountsForStep(s.ID)
 	if err != nil {
 		pipelineLogger.Errorf("Failed to get task counts: %v", err)
-		return 0
+		panic(err)
 	}
 
 	pipelineLogger.Printf("  %s: Starting (%d/%d already completed)", s.Name, processedTasks, totalTasks)
@@ -270,7 +281,16 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 	var mu sync.Mutex
 	lastPrint := time.Now()
 
-	workers.Parallel0(db.GetUnprocessedTasks(s.ID), *par, func(task Task) {
+	// Create a channel from the collected tasks for workers
+	unprocessedTasks := make(chan Task)
+	go func() {
+		defer close(unprocessedTasks)
+		for _, task := range unprocessedTasksList {
+			unprocessedTasks <- task
+		}
+	}()
+
+	workers.Parallel0(unprocessedTasks, *par, func(task Task) {
 		if task.Processed {
 			return
 		}
@@ -297,6 +317,8 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 	if err != nil {
 		panic(err)
 	}
+
+	fmt.Println("returning")
 
 	return numberOfExecutions
 }

@@ -77,7 +77,7 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 	iterationNum := 0
 	for execCount > 0 {
 		iterationNum++
-		runLogger.Printf("╔══════ Execution Round %d ══════╗", iterationNum)
+		runLogger.Printf("======= Execution Round %d =======", iterationNum)
 		c := pipeline.Execute(startStepName, parallel)
 		runLogger.Successf("Round %d completed: %d tasks processed", iterationNum, c)
 		execCount = c
