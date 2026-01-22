@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"slices"
 	"sync"
 	"time"
@@ -63,129 +60,21 @@ func (p Pipeline) ExecuteTask(t Task) {
 
 	t.Processed = true
 
-	inputFile, err := os.CreateTemp("/tmp", "input-*")
-	if err != nil {
-		panic(err)
+	// Execute the script
+	executor := NewScriptExecutor(db, &p)
+	execErr := executor.Execute(t, *step)
+
+	// Update task status
+	var errorMsg *string
+	if execErr != nil {
+		msg := execErr.Error()
+		errorMsg = &msg
 	}
-	defer os.Remove(inputFile.Name())
-
-	if t.ObjectHash != "" {
-		objectPath := db.GetObjectPath(t.ObjectHash)
-		data, err := os.Open(objectPath)
-		if err != nil {
-			panic(err)
-		}
-		n, err := io.Copy(inputFile, data)
-		if err != nil {
-			panic(err)
-		}
-		pipelineLogger.Verbosef("    Input: %d bytes from %s", n, t.ObjectHash[:16]+"...")
-
-	} else {
-		pipelineLogger.Verbosef("    Input: (empty - start step)")
-	}
-	inputFile.Close()
-
-	outputDir, err := os.MkdirTemp("/tmp", "output-*")
-	if err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll(outputDir)
-
-	// Start watching output directory
-	watcher, err := NewOutputWatcher(db, t, &p)
-	if err != nil {
-		pipelineLogger.Errorf("    Failed to create watcher: %v", err)
-		panic(err)
-	}
-	if err := watcher.Start(outputDir); err != nil {
-		pipelineLogger.Errorf("    Failed to start watcher: %v", err)
-		panic(err)
-	}
-	defer watcher.Stop()
-
-	pipelineLogger.Verbosef("    Executing: %s", step.Script)
-	cmd := exec.Command("sh", "-c", step.Script)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("INPUT_FILE=%s", inputFile.Name()),
-		fmt.Sprintf("OUTPUT_DIR=%s", outputDir),
-	)
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		panic(err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		panic(err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		pipelineLogger.Errorf("    Error starting script: %v", err)
-		panic(err)
-	}
-
-	scriptLogger := NewColorLogger(fmt.Sprintf("[SCRIPT:%s] ", step.Name), color.New(color.FgYellow))
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			scriptLogger.Verboseln(scanner.Text())
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			scriptLogger.Verbosef("[stderr] %s", scanner.Text())
-		}
-	}()
-
-	wg.Wait()
-
-	if err := cmd.Wait(); err != nil {
-		pipelineLogger.Errorf("    Error executing script: %v", err)
-		panic(err)
-	}
-
-	// Stop watcher to ensure all files are processed
-	watcher.Stop()
-
-	// runtime.Breakpoint()
-	err = db.UpdateTaskStatus(t.ID, true, nil)
-	if err != nil {
-		panic(err)
-	}
-
-	err = db.UpdateTaskStatus(t.ID, true, nil)
+	err = db.UpdateTaskStatus(t.ID, true, errorMsg)
 	if err != nil {
 		panic(err)
 	}
 }
-
-// func (p Pipeline) IterateUnprocessed() chan Task {
-// 	db := p.db
-
-// 	var tasksChans []chan Task
-
-// 	for step := range db.ListSteps() {
-// 		if !slices.Contains(p.enabledSteps, step) {
-// 			continue
-// 		}
-// 		if step.IsStart {
-// 			continue
-// 		}
-
-// 		c := db.GetUnprocessedTasks(step.ID)
-// 		tasksChans = append(tasksChans, c)
-// 	}
-
-// 	return chans.Merge(tasksChans...)
-// }
 
 func (p Pipeline) Seed() {
 	db := p.db
@@ -199,16 +88,13 @@ func (p Pipeline) Seed() {
 	}
 
 	// Try to find an unprocessed task first
-	var unprocessedTask *Task
+	var seedTask *Task
 	for task := range db.GetUnprocessedTasks(startStep.ID) {
-		unprocessedTask = &task
+		seedTask = &task
 		break
 	}
 
-	if unprocessedTask != nil {
-		// Execute existing unprocessed task
-		p.ExecuteTask(*unprocessedTask)
-	} else {
+	if seedTask == nil {
 		// No unprocessed tasks, create a new one
 		prestartTask := Task{
 			StepID: &startStep.ID,
@@ -219,12 +105,13 @@ func (p Pipeline) Seed() {
 			panic(err)
 		}
 
-		startTask, err := db.GetTask(startTaskId)
+		seedTask, err = db.GetTask(startTaskId)
 		if err != nil {
 			panic(err)
 		}
-		p.ExecuteTask(*startTask)
 	}
+
+	p.ExecuteTask(*seedTask)
 
 	err = db.UpdateStepStatus(startStep.ID, true)
 	if err != nil {
