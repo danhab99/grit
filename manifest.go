@@ -5,8 +5,9 @@ type Manifest struct {
 }
 
 type ManifestStep struct {
-	Name     string `toml:"name"`
-	Script   string `toml:"script"`
-	Start    bool   `toml:"start"`
-	Parallel *int   `toml:"parallel"`
+	Name     string   `toml:"name"`
+	Script   string   `toml:"script"`
+	Start    bool     `toml:"start"`
+	Parallel *int     `toml:"parallel"`
+	Inputs   []string `toml:"inputs"`
 }
