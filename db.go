@@ -24,21 +24,34 @@ CREATE TABLE IF NOT EXISTS step (
 
 CREATE TABLE IF NOT EXISTS task (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  object_hash      VARCHAR(64) NOT NULL,
-  step_id          INTEGER,
-  input_task_id    INTEGER,
+  step_id          INTEGER NOT NULL,
+  input_resource_id INTEGER,
   processed        INTEGER DEFAULT 0,
   error            TEXT,
-	runset           TEXT DEFAULT (CURRENT_TIMESTAMP),
+  runset           TEXT DEFAULT (CURRENT_TIMESTAMP),
 
   FOREIGN KEY(step_id) REFERENCES step(id),
-  FOREIGN KEY(input_task_id) REFERENCES task(id)
+  FOREIGN KEY(input_resource_id) REFERENCES resource(id),
+  UNIQUE(step_id, input_resource_id)
+);
+
+CREATE TABLE IF NOT EXISTS resource (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  name             TEXT NOT NULL,
+  object_hash      VARCHAR(64) NOT NULL,
+  step_id          INTEGER NOT NULL,
+  created_at       TEXT DEFAULT (CURRENT_TIMESTAMP),
+
+  FOREIGN KEY(step_id) REFERENCES step(id),
+  UNIQUE(name, object_hash, step_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_step_name ON step(name);
 CREATE INDEX IF NOT EXISTS idx_task_step ON task(step_id);
 CREATE INDEX IF NOT EXISTS idx_task_processed ON task(processed);
-CREATE INDEX IF NOT EXISTS idx_task_input ON task(input_task_id);
+CREATE INDEX IF NOT EXISTS idx_resource_name ON resource(name);
+CREATE INDEX IF NOT EXISTS idx_resource_step ON resource(step_id);
+CREATE INDEX IF NOT EXISTS idx_task_input_resource ON task(input_resource_id);
 `
 
 type Database struct {
@@ -57,29 +70,22 @@ type Step struct {
 }
 
 type Task struct {
-	ID          int64
-	ObjectHash  string
-	StepID      *int64
-	InputTaskID *int64
-	Processed   bool
-	Error       *string
+	ID              int64
+	StepID          int64
+	InputResourceID *int64
+	Processed       bool
+	Error           *string
+}
+
+type Resource struct {
+	ID         int64
+	Name       string
+	ObjectHash string
+	StepID     int64
+	CreatedAt  string
 }
 
 func (t Task) String() string {
-	var s string
-	if t.StepID == nil {
-		s = "NIL"
-	} else {
-		s = fmt.Sprintf("%d", *t.StepID)
-	}
-
-	var i string
-	if t.InputTaskID == nil {
-		i = "NIL"
-	} else {
-		i = fmt.Sprintf("%d", *t.InputTaskID)
-	}
-
 	var e string
 	if t.Error == nil {
 		e = "NIL"
@@ -87,7 +93,7 @@ func (t Task) String() string {
 		e = *t.Error
 	}
 
-	return fmt.Sprintf("Task(id=%d object_hash=%s step_id=%s input_task_id=%s processed=%v error=%s)", t.ID, t.ObjectHash, s, i, t.Processed, e)
+	return fmt.Sprintf("Task(id=%d step_id=%d processed=%v error=%s)", t.ID, t.StepID, t.Processed, e)
 }
 
 func NewDatabase(repo_path string, runset string) (Database, error) {
@@ -339,17 +345,28 @@ func (d Database) GetTaintedSteps() chan Step {
 	return stepChan
 }
 
-// Task CRUD operations
+// Resource CRUD operations
 
-func (d Database) CreateTask(task Task) (int64, error) {
-	p := 0
-	if task.Processed {
-		p = 1
+func (d Database) CreateResource(name string, objectHash string, stepID int64) (int64, error) {
+	// First check if the resource already exists
+	var existingID int64
+	err := d.db.QueryRow(`
+		SELECT id FROM resource 
+		WHERE name = ? AND object_hash = ? AND step_id = ?
+	`, name, objectHash, stepID).Scan(&existingID)
+	if err == nil {
+		// Resource already exists, return its ID
+		return existingID, nil
 	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+
+	// Resource doesn't exist, insert it
 	res, err := d.db.Exec(`
-INSERT OR IGNORE INTO task (object_hash, step_id, input_task_id, processed, error, runset)
-VALUES (?, ?, ?, ?, ?, ?);
-`, task.ObjectHash, task.StepID, task.InputTaskID, p, task.Error, d.runset)
+INSERT INTO resource (name, object_hash, step_id)
+VALUES (?, ?, ?)
+`, name, objectHash, stepID)
 	if err != nil {
 		return 0, err
 	}
@@ -359,20 +376,168 @@ VALUES (?, ?, ?, ?, ?, ?);
 		return 0, err
 	}
 
-	// If LastInsertId is 0, the insert was ignored (duplicate), so query for existing task
-	if id == 0 {
-		var existingID int64
-		err := d.db.QueryRow(`
-			SELECT id FROM task 
-			WHERE object_hash = ? AND step_id = ? AND (input_task_id = ? OR (input_task_id IS NULL AND ? IS NULL))
-		`, task.ObjectHash, task.StepID, task.InputTaskID, task.InputTaskID).Scan(&existingID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to find existing task after ignored insert: %w", err)
+	return id, nil
+}
+
+func (d Database) GetResource(id int64) (*Resource, error) {
+	var r Resource
+	err := d.db.QueryRow("SELECT id, name, object_hash, step_id, created_at FROM resource WHERE id = ?", id).Scan(
+		&r.ID, &r.Name, &r.ObjectHash, &r.StepID, &r.CreatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
 		}
-		return existingID, nil
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (d Database) GetResourcesByName(name string) chan Resource {
+	resourceChan := make(chan Resource)
+
+	go func() {
+		defer close(resourceChan)
+
+		rows, err := d.db.Query("SELECT id, name, object_hash, step_id, created_at FROM resource WHERE name = ? ORDER BY created_at DESC", name)
+		if err != nil {
+			dbLogger.Printf("Error querying resources by name %s: %v", name, err)
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var r Resource
+			if err := rows.Scan(&r.ID, &r.Name, &r.ObjectHash, &r.StepID, &r.CreatedAt); err != nil {
+				dbLogger.Printf("Error scanning resource: %v", err)
+				return
+			}
+			resourceChan <- r
+		}
+
+		if err := rows.Err(); err != nil {
+			dbLogger.Printf("Error iterating resources: %v", err)
+		}
+	}()
+
+	return resourceChan
+}
+
+func (d Database) GetResourcesProducedByStep(stepID int64) chan Resource {
+	resourceChan := make(chan Resource)
+
+	go func() {
+		defer close(resourceChan)
+
+		rows, err := d.db.Query("SELECT id, name, object_hash, step_id, created_at FROM resource WHERE step_id = ? ORDER BY created_at DESC", stepID)
+		if err != nil {
+			dbLogger.Printf("Error querying resources for step %d: %v", stepID, err)
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var r Resource
+			if err := rows.Scan(&r.ID, &r.Name, &r.ObjectHash, &r.StepID, &r.CreatedAt); err != nil {
+				dbLogger.Printf("Error scanning resource: %v", err)
+				return
+			}
+			resourceChan <- r
+		}
+
+		if err := rows.Err(); err != nil {
+			dbLogger.Printf("Error iterating resources: %v", err)
+		}
+	}()
+
+	return resourceChan
+}
+
+func (d Database) GetUnconsumedResourcesByName(name string, consumingStepID int64) chan Resource {
+	resourceChan := make(chan Resource)
+
+	go func() {
+		defer close(resourceChan)
+
+		// Find resources with this name that don't have a task in the consuming step that uses them as input
+		rows, err := d.db.Query(`
+			SELECT r.id, r.name, r.object_hash, r.step_id, r.created_at 
+			FROM resource r
+			WHERE r.name = ?
+			AND NOT EXISTS (
+				SELECT 1 FROM task t
+				WHERE t.input_resource_id = r.id 
+				AND t.step_id = ?
+			)
+			ORDER BY r.created_at DESC
+		`, name, consumingStepID)
+		if err != nil {
+			dbLogger.Printf("Error querying unconsumed resources for name %s, step %d: %v", name, consumingStepID, err)
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var r Resource
+			if err := rows.Scan(&r.ID, &r.Name, &r.ObjectHash, &r.StepID, &r.CreatedAt); err != nil {
+				dbLogger.Printf("Error scanning resource: %v", err)
+				return
+			}
+			resourceChan <- r
+		}
+
+		if err := rows.Err(); err != nil {
+			dbLogger.Printf("Error iterating resources: %v", err)
+		}
+	}()
+
+	return resourceChan
+}
+
+func (d Database) DeleteResource(id int64) error {
+	_, err := d.db.Exec("DELETE FROM resource WHERE id = ?", id)
+	return err
+}
+
+func (d Database) DeleteResourcesProducedByStep(stepID int64) error {
+	_, err := d.db.Exec("DELETE FROM resource WHERE step_id = ?", stepID)
+	return err
+}
+
+// GetTaskInputResource returns the input resource for a task (if any)
+func (d Database) GetTaskInputResource(taskID int64) (*Resource, error) {
+	var r Resource
+	err := d.db.QueryRow(`
+		SELECT r.id, r.name, r.object_hash, r.step_id, r.created_at
+		FROM resource r
+		INNER JOIN task t ON r.id = t.input_resource_id
+		WHERE t.id = ?
+	`, taskID).Scan(&r.ID, &r.Name, &r.ObjectHash, &r.StepID, &r.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+
+// Task CRUD operations
+
+func (d Database) CreateTask(task Task) (int64, error) {
+	p := 0
+	if task.Processed {
+		p = 1
+	}
+	res, err := d.db.Exec(`
+INSERT INTO task (step_id, input_resource_id, processed, error, runset)
+VALUES (?, ?, ?, ?, ?)
+`, task.StepID, task.InputResourceID, p, task.Error, d.runset)
+	if err != nil {
+		return 0, err
 	}
 
-	return id, nil
+	return res.LastInsertId()
 }
 
 func (d Database) BatchInsertTasks(tasks []Task) ([]Task, error) {
@@ -387,8 +552,8 @@ func (d Database) BatchInsertTasks(tasks []Task) ([]Task, error) {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-	INSERT OR IGNORE INTO task (object_hash, step_id, input_task_id, processed, error, runset)
-	VALUES (?, ?, ?, ?, ?, ?)`)
+	INSERT INTO task (step_id, input_resource_id, processed, error, runset)
+	VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, err
 	}
@@ -399,22 +564,13 @@ func (d Database) BatchInsertTasks(tasks []Task) ([]Task, error) {
 		if task.Processed {
 			p = 1
 		}
-		res, err := stmt.Exec(task.ObjectHash, task.StepID, task.InputTaskID, p, task.Error, d.runset)
+		res, err := stmt.Exec(task.StepID, task.InputResourceID, p, task.Error, d.runset)
 		if err != nil {
 			return nil, err
 		}
 		id, err := res.LastInsertId()
 		if err != nil {
 			return nil, err
-		}
-		// If the row was ignored (already exists), fetch the existing id
-		if id == 0 {
-			row := tx.QueryRow(`SELECT id FROM task WHERE object_hash = ? AND step_id = ? AND input_task_id IS ? AND runset = ?`,
-				task.ObjectHash, task.StepID, task.InputTaskID, d.runset)
-			err := row.Scan(&id)
-			if err != nil {
-				return nil, err
-			}
 		}
 		tasks[i].ID = int64(id)
 	}
@@ -426,10 +582,59 @@ func (d Database) BatchInsertTasks(tasks []Task) ([]Task, error) {
 	return tasks, nil
 }
 
+// CreateTasksFromResources creates tasks for a given step from a set of input resources.
+// Each resource will create a unique task (step_id, input_resource_id is unique).
+// Returns the created task IDs.
+func (d Database) CreateTasksFromResources(stepID int64, resourceIDs []int64) ([]int64, error) {
+	if len(resourceIDs) == 0 {
+		return nil, nil
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO task (step_id, input_resource_id, processed, error, runset)
+		VALUES (?, ?, 0, NULL, ?)
+		ON CONFLICT(step_id, input_resource_id) DO NOTHING
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	var taskIDs []int64
+	for _, resourceID := range resourceIDs {
+		res, err := stmt.Exec(stepID, resourceID, d.runset)
+		if err != nil {
+			return nil, err
+		}
+		
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		
+		// If LastInsertId is 0, the insert was ignored (duplicate)
+		if id > 0 {
+			taskIDs = append(taskIDs, id)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return taskIDs, nil
+}
+
 func (d Database) GetTask(id int64) (*Task, error) {
 	var t Task
-	err := d.db.QueryRow("SELECT id, object_hash, step_id, input_task_id, processed, error FROM task WHERE id = ?", id).Scan(
-		&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed, &t.Error,
+	err := d.db.QueryRow("SELECT id, step_id, input_resource_id, processed, error FROM task WHERE id = ?", id).Scan(
+		&t.ID, &t.StepID, &t.InputResourceID, &t.Processed, &t.Error,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -463,6 +668,36 @@ SET processed = 0, error = NULL
 WHERE step_id = ?
 `, stepID)
 	return err
+}
+
+func (d Database) MarkStepUndone(stepID int64) error {
+	// Delete all tasks and resources for this step
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Delete all tasks for this step
+	result, err := tx.Exec("DELETE FROM task WHERE step_id = ?", stepID)
+	if err != nil {
+		return err
+	}
+
+	tasksDeleted, _ := result.RowsAffected()
+
+	// Delete all resources produced by this step
+	_, err = tx.Exec("DELETE FROM resource WHERE step_id = ?", stepID)
+	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	dbLogger.Printf("Marked step %d as undone: deleted %d tasks and their resources", stepID, tasksDeleted)
+	return nil
 }
 
 func (d Database) MigrateTaintedStepTasks(taintedStepID int64) (int64, error) {
@@ -515,7 +750,7 @@ func (d Database) ListTasks() chan Task {
 	go func() {
 		defer close(taskChan)
 
-		rows, err := d.db.Query("SELECT id, object_hash, step_id, input_task_id, processed, error FROM task ORDER BY id")
+		rows, err := d.db.Query("SELECT id, step_id, input_resource_id, processed, error FROM task ORDER BY id")
 		if err != nil {
 			panic(err)
 		}
@@ -523,7 +758,7 @@ func (d Database) ListTasks() chan Task {
 
 		for rows.Next() {
 			var t Task
-			if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed, &t.Error); err != nil {
+			if err := rows.Scan(&t.ID, &t.StepID, &t.InputResourceID, &t.Processed, &t.Error); err != nil {
 				panic(err)
 			}
 			taskChan <- t
@@ -546,7 +781,7 @@ func (d Database) GetTasksForStep(stepID int64) chan Task {
 		defer close(taskChan)
 
 		rows, err := d.db.Query(`
-			SELECT id, object_hash, step_id, input_task_id, processed, error 
+			SELECT id, step_id, input_resource_id, processed, error 
 			FROM task 
 			WHERE step_id = ?
 			ORDER BY id
@@ -558,7 +793,7 @@ func (d Database) GetTasksForStep(stepID int64) chan Task {
 
 		for rows.Next() {
 			var t Task
-			if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed, &t.Error); err != nil {
+			if err := rows.Scan(&t.ID, &t.StepID, &t.InputResourceID, &t.Processed, &t.Error); err != nil {
 				panic(err)
 			}
 			taskChan <- t
@@ -670,21 +905,17 @@ func (d Database) GetUnprocessedTasks(stepID int64) chan Task {
 		var taskCount int64 = 0
 		defer func() {
 			dbLogger.Printf("GetUnprocessedTasks(step=%d) found %d unprocessed tasks", stepID, taskCount)
+			fmt.Printf("!!!! CLOSING\n")
 		}()
 
+		// Get all unprocessed tasks for this step
 		rows, err := d.db.Query(`
-			SELECT id, object_hash, step_id, input_task_id, processed, error 
-			FROM task 
-			WHERE step_id = ? 
-			  AND processed = 0
-			  AND (
-			    id NOT IN (SELECT DISTINCT input_task_id FROM task WHERE input_task_id IS NOT NULL)
-			    OR id IN (SELECT DISTINCT t1.id FROM task t1 
-			              INNER JOIN task t2 ON t1.id = t2.input_task_id 
-			              WHERE t1.step_id = ? AND t1.processed = 0)
-			  )
-			ORDER BY id
-		`, stepID, stepID)
+			SELECT t.id, t.step_id, t.input_resource_id, t.processed, t.error
+			FROM task t
+			WHERE t.step_id = ? 
+			  AND t.processed = 0
+			ORDER BY t.id
+		`, stepID)
 		if err != nil {
 			dbLogger.Printf("Error querying unprocessed tasks for step %d: %v", stepID, err)
 			return
@@ -693,7 +924,7 @@ func (d Database) GetUnprocessedTasks(stepID int64) chan Task {
 
 		for rows.Next() {
 			var t Task
-			if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed, &t.Error); err != nil {
+			if err := rows.Scan(&t.ID, &t.StepID, &t.InputResourceID, &t.Processed, &t.Error); err != nil {
 				dbLogger.Printf("Error scanning task for step %d: %v", stepID, err)
 				return
 			}
@@ -709,51 +940,79 @@ func (d Database) GetUnprocessedTasks(stepID int64) chan Task {
 	return taskChan
 }
 
-func (d Database) GetNextTasks(taskID int64) chan Task {
-	taskChan := make(chan Task)
-
-	go func() {
-		defer close(taskChan)
-
-		rows, err := d.db.Query(`
-			SELECT id, object_hash, step_id, input_task_id, processed, error 
-			FROM task 
-			WHERE input_task_id = ?
-			ORDER BY id
-		`, taskID)
-		if err != nil {
-			panic(err)
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var t Task
-			if err := rows.Scan(&t.ID, &t.ObjectHash, &t.StepID, &t.InputTaskID, &t.Processed, &t.Error); err != nil {
-				panic(err)
-			}
-			taskChan <- t
-		}
-
-		if err := rows.Err(); err != nil {
-			panic(err)
-		}
-	}()
-
-	return taskChan
-}
-
-func (d Database) IsTaskCompletedInNextStep(nextStepID, taskID int64) (bool, error) {
-	var completed bool
-	err := d.db.QueryRow(`
-		SELECT EXISTS(
-			SELECT 1 FROM task 
-			WHERE step_id = ? AND input_task_id = ? AND processed = 1
-		)
-	`, nextStepID, taskID).Scan(&completed)
-	return completed, err
-}
-
 // Utility functions
+
+// StoreObject stores object data in BadgerDB
+func (d Database) StoreObject(hash string, data []byte) error {
+	// Use WriteBatch for better performance even for single writes
+	wb := d.badgerDB.NewWriteBatch()
+	defer wb.Cancel()
+
+	if err := wb.Set([]byte(hash), data); err != nil {
+		return err
+	}
+
+	return wb.Flush()
+}
+
+// StoreObjectBatch stores multiple objects in a single batch (much faster)
+func (d Database) StoreObjectBatch(objects map[string][]byte) error {
+	wb := d.badgerDB.NewWriteBatch()
+	defer wb.Cancel()
+
+	for hash, data := range objects {
+		if err := wb.Set([]byte(hash), data); err != nil {
+			return err
+		}
+	}
+
+	return wb.Flush()
+}
+
+// GetObject retrieves object data from BadgerDB
+func (d Database) GetObject(hash string) ([]byte, error) {
+	var data []byte
+	err := d.badgerDB.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(hash))
+		if err != nil {
+			return err
+		}
+		data, err = item.ValueCopy(nil)
+		return err
+	})
+	return data, err
+}
+
+// GetObjectBatch retrieves multiple objects in a single transaction (faster for sequential reads)
+func (d Database) GetObjectBatch(hashes []string) (map[string][]byte, error) {
+	results := make(map[string][]byte)
+
+	err := d.badgerDB.View(func(txn *badger.Txn) error {
+		for _, hash := range hashes {
+			item, err := txn.Get([]byte(hash))
+			if err != nil {
+				return err
+			}
+			data, err := item.ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			results[hash] = data
+		}
+		return nil
+	})
+
+	return results, err
+}
+
+// ObjectExists checks if an object exists in BadgerDB
+func (d Database) ObjectExists(hash string) bool {
+	err := d.badgerDB.View(func(txn *badger.Txn) error {
+		_, err := txn.Get([]byte(hash))
+		return err
+	})
+	return err == nil
+}
 
 func (d Database) GetObjectPath(hash string) string {
 	dir := fmt.Sprintf(
@@ -761,9 +1020,12 @@ func (d Database) GetObjectPath(hash string) string {
 		d.repo_path, hash[0:2], hash[2:4], hash[4:6],
 	)
 
-	err := os.MkdirAll(dir, 0755)
-	if err != nil {
-		panic(err)
+	for {
+		err := os.MkdirAll(dir, 0755)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return fmt.Sprintf("%s/%s", dir, hash[6:])
@@ -787,5 +1049,16 @@ func (d Database) ForceSaveWAL() error {
 		return err
 	}
 	dbLogger.Println("WAL checkpoint complete")
+	return nil
+}
+
+// Close closes both SQLite and BadgerDB connections
+func (d Database) Close() error {
+	if err := d.db.Close(); err != nil {
+		return fmt.Errorf("failed to close SQLite: %w", err)
+	}
+	if err := d.badgerDB.Close(); err != nil {
+		return fmt.Errorf("failed to close BadgerDB: %w", err)
+	}
 	return nil
 }
