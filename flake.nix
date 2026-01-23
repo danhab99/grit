@@ -47,6 +47,7 @@
             echo "  go build      - Build the project"
             echo "  go test       - Run tests"
             echo "  dlv debug     - Debug with Delve"
+            export OUTPUT_DIR=$(mktemp -d)
           '';
 
           CGO_CFLAGS = "-U_FORTIFY_SOURCE";
