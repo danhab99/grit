@@ -84,7 +84,7 @@ func (fw *FuseWatcher) Entries() <-chan fs.DirEntry {
 
 // Start begins serving the FUSE filesystem
 func (fw *FuseWatcher) Start() {
-	fuseLogger.Println("Starting server") 
+	fuseLogger.Println("Starting server")
 	go fw.server.Serve()
 }
 
@@ -110,7 +110,7 @@ func (fw *FuseWatcher) Stop() error {
 
 	err := fw.server.Unmount()
 	close(fw.entries)
-	fuseLogger.Println("Stopping server") 
+	fuseLogger.Println("Stopping server")
 	return err
 }
 
@@ -200,7 +200,10 @@ func (f *fuseFile) Write(data []byte, off int64) (uint32, fuse.Status) {
 		f.data.content = newContent
 	}
 
-	fuseLogger.Printf("write %s %d\n", f.name, len(data))
+	// Only log first write to avoid spam for large files
+	if off == 0 {
+		fuseLogger.Printf("write %s started\n", f.name)
+	}
 	copy(f.data.content[off:], data)
 	return uint32(len(data)), fuse.OK
 }
@@ -242,7 +245,7 @@ func (f *fuseFile) Release() {
 	f.watcher.mu.Lock()
 	delete(f.watcher.files, f.name)
 	f.watcher.mu.Unlock()
-	
+
 	// Signal that this file is closed
 	f.watcher.openFiles.Done()
 }

@@ -11,15 +11,15 @@ import (
 )
 
 type ScriptExecutor struct {
-	db       *Database
-	pipeline *Pipeline
+	db        *Database
+	pipeline  *Pipeline
 	outputDir string
 }
 
 func NewScriptExecutor(db *Database, pipeline *Pipeline, outputDir string) *ScriptExecutor {
 	return &ScriptExecutor{
-		db:       db,
-		pipeline: pipeline,
+		db:        db,
+		pipeline:  pipeline,
 		outputDir: outputDir,
 	}
 }

@@ -33,8 +33,6 @@ func NewPipeline(d *Database, steps []Step, stepInputs map[int64][]string) (*Pip
 	return p, nil
 }
 
-
-
 func (p *Pipeline) GetStepsByInputName(resourceName string) []int64 {
 	pipelineLogger.Printf("Looking up steps for resource name: '%s'\n", resourceName)
 	pipelineLogger.Printf("Available stepInputs map: %+v\n", p.stepInputs)
@@ -141,7 +139,7 @@ func (p Pipeline) ExecuteStep(s Step, maxParallel int) int64 {
 				continue
 			}
 			if nextStep == nil {
-				pipelineLogger.Printf("No step found for name: %s", stepName)
+				// No step found for this resource name, skip it
 				continue
 			}
 

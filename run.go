@@ -100,7 +100,7 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 	if !hasResources {
 		// No resources exist, we need to seed the pipeline
 		runLogger.Printf("No seed resources found, creating and executing seed task")
-		
+
 		// Create FUSE server for seed task
 		fuseOutputs := make(chan FileData, 10)
 		fuseWatcher, err := NewTempDirFuseWatcher(fuseOutputs)
@@ -123,7 +123,7 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 					continue
 				}
 				if nextStep == nil {
-					runLogger.Printf("No step found for name: %s", stepName)
+					// No step found for this resource name, skip it
 					continue
 				}
 
@@ -152,7 +152,7 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 				runLogger.Printf("Created seed task for %s in step %s", hash[:16]+"...", stepName)
 			}
 		}()
-		
+
 		// Create seed task
 		seedTask := Task{
 			StepID:    startStep.ID,
@@ -194,14 +194,14 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 		}
 
 		runLogger.Successf("Seed task executed successfully")
-		
+
 		// Stop FUSE server (waits for all files to be closed and processed)
 		runLogger.Printf("Waiting for seed outputs to be processed...")
 		if err := fuseWatcher.Stop(); err != nil {
 			runLogger.Printf("Error stopping FUSE: %v", err)
 		}
 		close(fuseOutputs)
-		
+
 		// Verify seed resources were created
 		resourceCount := 0
 		for range database.GetResourcesProducedByStep(startStep.ID) {
