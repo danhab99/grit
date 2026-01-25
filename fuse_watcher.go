@@ -69,6 +69,9 @@ func NewFuseWatcher(mountPath string, outputChan chan<- FileData) (*FuseWatcher,
 	}
 
 	fw.server = server
+
+	fw.Start()
+
 	return fw, nil
 }
 

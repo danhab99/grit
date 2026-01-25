@@ -48,7 +48,6 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 	}
 	defer pipeline.fuseWatcher.Stop()
 
-	pipeline.fuseWatcher.Start()
 	runLogger.Printf("FUSE server started at: %s", pipeline.GetFusePath())
 
 	// Check if we need to seed
