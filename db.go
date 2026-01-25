@@ -104,8 +104,13 @@ func NewDatabase(repo_path string) (Database, error) {
 		return Database{}, err
 	}
 
+	err = os.MkdirAll(repo_path + "/sqlite", 0755)
+	if err != nil {
+		return Database{}, err
+	}
+
 	dbLogger.Printf("Opening database at %s/db", repo_path)
-	db, err := sql.Open("sqlite3", fmt.Sprintf("%s/db?timeout=600000", repo_path))
+	db, err := sql.Open("sqlite3", fmt.Sprintf("%s/sqlite/db?timeout=600000", repo_path))
 	if err != nil {
 		return Database{}, err
 	}
