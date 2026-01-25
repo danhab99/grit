@@ -40,7 +40,7 @@ A Go-based data pipeline system that executes shell scripts in a managed workflo
 #### Build with Nix
 ```bash
 nix build
-./result/bin/task-pipeline --help
+./result/bin/grit --help
 ```
 
 #### Run directly
@@ -57,15 +57,15 @@ Add this flake as an input to your NixOS configuration flake:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    task-pipeline = {
-      url = "path:/home/dan/Documents/go/src/task-pipeline";
+    grit = {
+      url = "path:/home/dan/Documents/go/src/grit";
       # Or use a git repository:
-      # url = "github:danhab99/task-pipeline";
+      # url = "github:danhab99/grit";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, task-pipeline, ... }: {
+  outputs = { self, nixpkgs, grit, ... }: {
     nixosConfigurations.yourhostname = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
@@ -73,7 +73,7 @@ Add this flake as an input to your NixOS configuration flake:
         {
           # Add to system packages
           environment.systemPackages = [
-            task-pipeline.packages.x86_64-linux.default
+            grit.packages.x86_64-linux.default
           ];
         }
       ];
@@ -82,10 +82,10 @@ Add this flake as an input to your NixOS configuration flake:
 }
 ```
 
-After rebuilding your system, `task-pipeline` will be available system-wide:
+After rebuilding your system, `grit` will be available system-wide:
 ```bash
 sudo nixos-rebuild switch --flake .#yourhostname
-task-pipeline --help
+grit --help
 ```
 
 Alternatively, add it to your home-manager configuration:
@@ -94,19 +94,19 @@ Alternatively, add it to your home-manager configuration:
 { inputs, ... }:
 {
   home.packages = [
-    inputs.task-pipeline.packages.x86_64-linux.default
+    inputs.grit.packages.x86_64-linux.default
   ];
 }
 ```
 
 ### Build without Nix
 ```bash
-go build -o task-pipeline
+go build -o grit
 ```
 
 ### Run a Pipeline
 ```bash
-./task-pipeline -manifest workflow.toml -db ./my-pipeline-db -run
+./grit -manifest workflow.toml -db ./my-pipeline-db -run
 ```
 
 ### Create a Manifest (workflow.toml)
@@ -138,28 +138,28 @@ cat $INPUT_FILE | sort > $OUTPUT_DIR/sorted
 ### Common Commands
 ```bash
 # Run the pipeline
-./task-pipeline -manifest manifest.toml --db ./db -run
+./grit -manifest manifest.toml --db ./db -run
 
 # Run with parallel limit
-./task-pipeline -manifest manifest.toml --db ./db -run -parallel 4
+./grit -manifest manifest.toml --db ./db -run -parallel 4
 
 # Specify starting step
-./task-pipeline -manifest manifest.toml --db ./db -run -start process_name
+./grit -manifest manifest.toml --db ./db -run -start process_name
 
 # Filter to specific steps (can be used multiple times)
-./task-pipeline -manifest manifest.toml --db ./db -run -step process_name -step transform_name
+./grit -manifest manifest.toml --db ./db -run -step process_name -step transform_name
 
 # Export resources by name
-./task-pipeline -manifest manifest.toml --db ./db -export dataset-v1
+./grit -manifest manifest.toml --db ./db -export dataset-v1
 
 # Export resource content by hash
-./task-pipeline -manifest manifest.toml --db ./db -export-hash <sha256-hash>
+./grit -manifest manifest.toml --db ./db -export-hash <sha256-hash>
 
 # Run with verbose output (see detailed task and script information)
-./task-pipeline -manifest manifest.toml --db ./db -run -verbose
+./grit -manifest manifest.toml --db ./db -run -verbose
 
 # Run with minimal output (for automation/CI)
-./task-pipeline -manifest manifest.toml --db ./db -run -quiet
+./grit -manifest manifest.toml --db ./db -run -quiet
 ```
 
 ## Overview
@@ -216,32 +216,32 @@ Releases are automated via GitHub Actions. To create a new release:
 2. **GitHub Actions will automatically:**
    - Build the binary using Nix
    - Create a GitHub release
-   - Attach the compiled binary (`task-pipeline-linux-x86_64`)
+   - Attach the compiled binary (`grit-linux-x86_64`)
    - Generate installation instructions
 
 3. **Users can then:**
    - Download the binary directly from the release page
-   - Use `nix run github:danhab99/task-pipeline/v0.1.0`
+   - Use `nix run github:danhab99/grit/v0.1.0`
    - Reference the specific version in their flake inputs
 
 ### Installing from a Release
 
 #### Binary Download
 ```bash
-wget https://github.com/danhab99/task-pipeline/releases/download/v0.1.0/task-pipeline-linux-x86_64
-chmod +x task-pipeline-linux-x86_64
-sudo mv task-pipeline-linux-x86_64 /usr/local/bin/task-pipeline
+wget https://github.com/danhab99/grit/releases/download/v0.1.0/grit-linux-x86_64
+chmod +x grit-linux-x86_64
+sudo mv grit-linux-x86_64 /usr/local/bin/grit
 ```
 
 #### Using Nix (specific version)
 ```bash
-nix run github:danhab99/task-pipeline/v0.1.0 -- --help
+nix run github:danhab99/grit/v0.1.0 -- --help
 ```
 
 #### In your flake (specific version)
 ```nix
 {
-  inputs.task-pipeline.url = "github:danhab99/task-pipeline/v0.1.0";
+  inputs.grit.url = "github:danhab99/grit/v0.1.0";
 }
 ```
 
@@ -337,7 +337,7 @@ Start Step
 ## Usage
 
 ```bash
-task-pipeline -manifest <path-to-manifest.toml> -db <database-directory> [options]
+grit -manifest <path-to-manifest.toml> -db <database-directory> [options]
 ```
 
 ### Command-Line Flags
@@ -414,12 +414,12 @@ When you modify a step's script in your manifest, GRIT automatically handles ver
 ### Workflow
 ```bash
 # Initial run
-./task-pipeline -manifest workflow.toml --db ./db -run
+./grit -manifest workflow.toml --db ./db -run
 
 # Edit workflow.toml - change a step's script or inputs
 
 # Run again - new version is automatically created and used
-./task-pipeline -manifest workflow.toml --db ./db -run
+./grit -manifest workflow.toml --db ./db -run
 ```
 
 The unique constraint on `(step.name, step.version)` ensures each modification creates a new version while preserving old task executions.
@@ -529,16 +529,16 @@ cat $INPUT_FILE | sort > $OUTPUT_DIR/final
 
 2. Run the pipeline:
 ```bash
-./task-pipeline -manifest workflow.toml -db ./my-db -run
+./grit -manifest workflow.toml -db ./my-db -run
 ```
 
 3. Export the final results:
 ```bash
 # List all "final" resource hashes
-./task-pipeline -manifest workflow.toml -db ./my-db -export final
+./grit -manifest workflow.toml -db ./my-db -export final
 
 # Export specific resource by hash
-./task-pipeline -manifest workflow.toml -db ./my-db -export-hash <hash> > output.txt
+./grit -manifest workflow.toml -db ./my-db -export-hash <hash> > output.txt
 ```
 
 4. Modify the process step in workflow.toml:
@@ -554,7 +554,7 @@ tr '[:lower:]' '[:upper:]' < $INPUT_FILE | rev > $OUTPUT_DIR/processed
 
 5. Run again - new version is automatically created:
 ```bash
-./task-pipeline -manifest workflow.toml -db ./my-db -run
+./grit -manifest workflow.toml -db ./my-db -run
 ```
 
 ## Output
