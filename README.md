@@ -121,15 +121,15 @@ echo "More data" > $OUTPUT_DIR/dataset-v2
 
 [[step]]
 name = "process"
-inputs = "dataset-v1"  # Filter: only process resources named "dataset-v1"
+inputs = ["dataset-v1"]  # Filter: only process resources named "dataset-v1"
 script = '''
 cat $INPUT_FILE | tr '[:lower:]' '[:upper:]' > $OUTPUT_DIR/processed
 '''
 
 [[step]]
 name = "transform"
-inputs = "dataset-v2"  # Filter: only process resources named "dataset-v2"
-parallel = 2           # Limit to 2 concurrent tasks for this step
+inputs = ["dataset-v2"]  # Filter: only process resources named "dataset-v2"
+parallel = 2             # Limit to 2 concurrent tasks for this step
 script = '''
 cat $INPUT_FILE | sort > $OUTPUT_DIR/sorted
 '''
@@ -315,7 +315,7 @@ GRIT uses a **resource-based execution model** where data flows through the pipe
    ```toml
    [[step]]
    name = "processor"
-   inputs = "my-dataset"  # Only processes resources named "my-dataset"
+   inputs = ["my-dataset"]  # Only processes resources named "my-dataset"
    ```
 
 3. **Incremental Processing**: The `GetUnconsumedResources()` method finds resources that haven't been processed by a step yet, enabling incremental pipelines.
@@ -328,9 +328,9 @@ GRIT uses a **resource-based execution model** where data flows through the pipe
 ```
 Start Step
   └─> Writes "raw-data" resource
-        └─> Step with inputs="raw-data" processes it
+        └─> Step with inputs=["raw-data"] processes it
               └─> Writes "processed" resource
-                    └─> Step with inputs="processed" processes it
+                    └─> Step with inputs=["processed"] processes it
                           └─> Writes "final" resource
 ```
 
@@ -368,7 +368,7 @@ curl https://api.example.com/data > $OUTPUT_DIR/data
 
 [[step]]
 name = "process"
-inputs = "data"  # Only process resources named "data"
+inputs = ["data"]  # Only process resources named "data"
 script = """
 # Process the data and generate output
 process-tool < $INPUT_FILE > $OUTPUT_DIR/result
@@ -376,8 +376,8 @@ process-tool < $INPUT_FILE > $OUTPUT_DIR/result
 
 [[step]]
 name = "transform"
-inputs = "result"  # Only process resources named "result"
-parallel = 2      # Limit this step to 2 parallel tasks
+inputs = ["result"]  # Only process resources named "result"
+parallel = 2         # Limit this step to 2 parallel tasks
 script = """
 # Transform and output to next step
 transform-tool < $INPUT_FILE > $OUTPUT_DIR/final
@@ -398,7 +398,7 @@ Each step script receives:
 ```toml
 [[step]]
 name = "processor"
-inputs = "dataset-v1"  # Only processes resources named "dataset-v1"
+inputs = ["dataset-v1"]  # Only processes resources named "dataset-v1"
 script = "process < $INPUT_FILE > $OUTPUT_DIR/output"
 ```
 
@@ -514,14 +514,14 @@ echo 'more samples' > $OUTPUT_DIR/raw-data-2
 
 [[step]]
 name = "process"
-inputs = "raw-data"  # Only process resources named "raw-data"
+inputs = ["raw-data"]  # Only process resources named "raw-data"
 script = """
 tr '[:lower:]' '[:upper:]' < $INPUT_FILE > $OUTPUT_DIR/processed
 """
 
 [[step]]
 name = "finalize"
-inputs = "processed"  # Only process resources named "processed"
+inputs = ["processed"]  # Only process resources named "processed"
 script = """
 cat $INPUT_FILE | sort > $OUTPUT_DIR/final
 """
@@ -545,7 +545,7 @@ cat $INPUT_FILE | sort > $OUTPUT_DIR/final
 ```toml
 [[step]]
 name = "process"
-inputs = "raw-data"
+inputs = ["raw-data"]
 script = """
 # Added additional processing
 tr '[:lower:]' '[:upper:]' < $INPUT_FILE | rev > $OUTPUT_DIR/processed
