@@ -88,3 +88,12 @@ func hashStringSHA256(s string) string {
 	hasher.Write([]byte(s))
 	return fmt.Sprintf("%x", hasher.Sum(nil))
 }
+
+func mkTemp() string {
+	dir, err := os.MkdirTemp("/tmp", "output-*")
+	if err != nil {
+		panic(err)
+	}
+
+	return dir
+}
