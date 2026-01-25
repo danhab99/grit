@@ -3,12 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 
 	"github.com/fatih/color"
 	"github.com/pelletier/go-toml"
 )
+
+const LOG_FLAGS = log.Lshortfile | log.Lmicroseconds | log.Ldate
 
 type stringSlice []string
 
@@ -27,11 +30,10 @@ func main() {
 	manifest_path := flag.String("manifest", "", "manifest path")
 	db_path := flag.String("db", "./db", "database path")
 	parallel := flag.Int("parallel", runtime.NumCPU(), "number of processes to run in parallel")
-	exportName := flag.String("export", "", "export a specific step")
-	// inputPath := flag.String("input-path", "", "export outputs for a specific input path")
+	exportName := flag.String("export", "", "list resource hashes by name")
+	exportHash := flag.String("export-hash", "", "export file content by hash")
 	runPipeline := flag.Bool("run", false, "run the pipeline")
 	startStep := flag.String("start", "", "step to start from (optional, defaults to start step in manifest)")
-	runset := flag.String("runset", "", "categorize tasks into runset groups")
 	verbose := flag.Bool("verbose", false, "enable verbose logging")
 	quiet := flag.Bool("quiet", false, "minimal output (overrides verbose)")
 
@@ -67,7 +69,7 @@ func main() {
 	checkDiskSpace(*db_path)
 
 	mainLogger.Verbosef("Initializing database at: %s", *db_path)
-	database, err := NewDatabase(*db_path, *runset)
+	database, err := NewDatabase(*db_path)
 	if err != nil {
 		panic(err)
 	}
@@ -75,6 +77,8 @@ func main() {
 	if *runPipeline {
 		run(manifest, database, *parallel, *startStep, enabledSteps)
 	} else if exportName != nil && *exportName != "" {
-		exportResults(database, *exportName)
+		exportResourcesByName(database, *exportName)
+	} else if exportHash != nil && *exportHash != "" {
+		exportResourceByHash(database, *exportHash)
 	}
 }
