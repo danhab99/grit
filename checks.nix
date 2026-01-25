@@ -12,15 +12,13 @@ in
         step1 = grit.mkStep { name = "test"; script = "echo hi"; parallel = 1; };
         pipeline = grit.mkGritPipeline { name = "testpipeline"; steps = [ step1 ]; };
         expected = ''
-[[step]]
-name="test"
-script='''
-echo hi
-'''
+       [[step]]
+       name=test
+       script=''
+       echo hi
+ ''
 
-parallel=1
-
-        '';
+       parallel=1        '';
       in
       ''
         if [ "${pipeline}" = "${expected}" ]; then

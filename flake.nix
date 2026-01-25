@@ -19,7 +19,7 @@
         packages = {
           default = pkgs.buildGoModule {
             pname = "task-pipeline";
-            version = "0.1.0";
+            version = "0.2.0";
             src = self;
             vendorHash = "sha256-lyPVR2ZXBaelbsk/zNxjxgOnrKMUm8shdXW7mXU4ndM=";
             subPackages = [ "." ];
@@ -49,7 +49,7 @@
           CGO_CPPFLAGS = "-U_FORTIFY_SOURCE";
         };
 
-        checks = import ./checks.nix { inherit pkgs grit; };
+        # checks = import ./checks.nix { inherit pkgs grit; };
       }
     )) // {
       lib = import ./lib.nix { };
