@@ -13,7 +13,7 @@
         };
         lib = pkgs.lib;
 
-        grit = import ./lib.nix { };
+        grit = import ./lib.nix { inherit lib; };
       in
       {
         packages = {
@@ -49,9 +49,14 @@
           CGO_CPPFLAGS = "-U_FORTIFY_SOURCE";
         };
 
-        # checks = import ./checks.nix { inherit pkgs grit; };
-      }
-    )) // {
-      lib = import ./lib.nix { };
-    };
+        checks = import ./checks.nix { inherit pkgs grit lib; };
+      })) // (let
+        pkgs = import nixpkgs {
+          system = "x86_64-linux";
+          config.allowUnfree = true;
+        };
+        lib = pkgs.lib;
+      in {
+        lib = import ./lib.nix { inherit lib pkgs; };
+      });
 }
