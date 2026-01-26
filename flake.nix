@@ -18,7 +18,7 @@
       {
         packages = {
           default = pkgs.buildGoModule {
-            pname = "task-pipeline";
+            pname = "grit";
             version = "0.2.0";
             src = self;
             vendorHash = "sha256-lyPVR2ZXBaelbsk/zNxjxgOnrKMUm8shdXW7mXU4ndM=";

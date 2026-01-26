@@ -1,4 +1,4 @@
-module task-pipeline
+module grit
 
 go 1.24.4
 
