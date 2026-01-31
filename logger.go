@@ -7,5 +7,5 @@ import (
 )
 
 func NewLogger(prefix string) *log.Logger {
-	return log.New(os.Stderr, fmt.Sprintf("[%s] ", prefix), log.Ldate|log.Ltime|log.Lshortfile)
+	return log.New(os.Stderr, fmt.Sprintf("[%s] ", prefix), log.Ldate|log.Lmicroseconds|log.Lshortfile)
 }
