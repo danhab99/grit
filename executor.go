@@ -23,9 +23,6 @@ func NewScriptExecutor(db *Database, pipeline *Pipeline) *ScriptExecutor {
 var executeLogger = NewLogger("EXEC")
 
 func (e *ScriptExecutor) Execute(task Task, step Step, outputChan chan FileData) error {
-	watcher, err := NewTempDirFuseWatcher(outputChan)
-	defer watcher.WaitForWrites()
-
 	executeLogger.Printf("Executing task ID=%d for step '%s' (step_id=%d)\n", task.ID, step.Name, task.StepID)
 
 	// Create input file
@@ -43,7 +40,7 @@ func (e *ScriptExecutor) Execute(task Task, step Step, outputChan chan FileData)
 
 	// Execute the script
 	executeLogger.Printf("Executing: %s\n", step.Script)
-	cmd := e.buildCommand(step, inputFile.Name(), watcher.mountPath)
+	cmd := e.buildCommand(step, inputFile.Name(), e.pipeline.fuseWatcher.mountPath)
 
 	// Run script and capture output
 	if err := e.runScript(cmd, step); err != nil {
