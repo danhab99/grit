@@ -10,8 +10,6 @@ import (
 	"os/exec"
 	"sync"
 	"time"
-
-	"github.com/danhab99/idk/workers"
 )
 
 type ScriptExecutor struct {

@@ -3,12 +3,16 @@ package utils
 import (
 	"crypto/sha256"
 	"fmt"
+	"grit/log"
 	"io"
 	"os"
 	"syscall"
 )
 
-func checkDiskSpace(dbPath string) {
+var utilsLogger = log.NewLogger("UTILS")
+
+// CheckDiskSpace logs a warning if disk space is running low
+func CheckDiskSpace(dbPath string) {
 	stat := syscall.Statfs_t{}
 	err := syscall.Statfs(dbPath, &stat)
 	if err != nil {
@@ -21,7 +25,7 @@ func checkDiskSpace(dbPath string) {
 	percentUsed := (usedGB / totalGB) * 100
 
 	if percentUsed > 85 {
-		mainLogger.Printf("⚠️  Disk %s is %.1f%% full (%.1fGB free / %.1fGB total). This may cause database slowness.\n", dbPath, percentUsed, availableGB, totalGB)
+		utilsLogger.Printf("⚠️  Disk %s is %.1f%% full (%.1fGB free / %.1fGB total). This may cause database slowness.\n", dbPath, percentUsed, availableGB, totalGB)
 	}
 }
 
