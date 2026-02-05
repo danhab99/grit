@@ -2,7 +2,6 @@
 
 [[step]]
 name = "extract"
-start = true
 script = '''
 echo "hello world" > $OUTPUT_DIR/process
 '''

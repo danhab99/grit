@@ -2,7 +2,6 @@
 
 [[step]]
 name = "start"
-start = true
 script = '''
 echo "banana" > $OUTPUT_DIR/upper
 echo "banana" > $OUTPUT_DIR/sort

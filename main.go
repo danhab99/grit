@@ -3,14 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
 
+	"grit/db"
+	"grit/log"
+
 	"github.com/pelletier/go-toml"
 )
-
-const LOG_FLAGS = log.Lshortfile | log.Lmicroseconds | log.Ldate
 
 type stringSlice []string
 
@@ -23,7 +23,7 @@ func (s *stringSlice) Set(value string) error {
 	return nil
 }
 
-var mainLogger = NewLogger("MAIN")
+var mainLogger = log.NewLogger("MAIN")
 
 func main() {
 	manifest_path := flag.String("manifest", "", "manifest path")
@@ -32,7 +32,6 @@ func main() {
 	exportName := flag.String("export", "", "list resource hashes by name")
 	exportHash := flag.String("export-hash", "", "export file content by hash")
 	runPipeline := flag.Bool("run", false, "run the pipeline")
-	startStep := flag.String("start", "", "step to start from (optional, defaults to start step in manifest)")
 
 	var enabledSteps stringSlice
 	flag.Var(&enabledSteps, "step", "steps to run")
@@ -57,13 +56,13 @@ func main() {
 	checkDiskSpace(*db_path)
 
 	mainLogger.Printf("Initializing database at: %s\n", *db_path)
-	database, err := NewDatabase(*db_path)
+	database, err := db.NewDatabase(*db_path)
 	if err != nil {
 		panic(err)
 	}
 
 	if *runPipeline {
-		run(manifest, database, *parallel, *startStep, enabledSteps)
+		run(manifest, database, *parallel, enabledSteps)
 	} else if exportName != nil && *exportName != "" {
 		exportResourcesByName(database, *exportName)
 	} else if exportHash != nil && *exportHash != "" {

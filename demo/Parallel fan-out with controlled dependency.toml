@@ -1,6 +1,5 @@
 [[step]]
 name = "generate"
-start = true
 script = '''
 for i in $(seq 1 8); do
   echo "$i" > $OUTPUT_DIR/work

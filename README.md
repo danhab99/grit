@@ -111,7 +111,7 @@ go build -o grit
 ```toml
 [[step]]
 name = "start"
-start = true
+# No inputs specified - this is a starter step
 script = '''
 echo "Input data" > $OUTPUT_DIR/dataset-v1
 echo "More data" > $OUTPUT_DIR/dataset-v2
@@ -258,13 +258,14 @@ Entry point that:
 ### 2. **Manifest (`manifest.go`)**
 Defines the pipeline structure:
 - `Manifest`: Contains array of steps
-- `ManifestStep`: Step properties (name, script, start flag, parallel count, inputs filter)
+- `ManifestStep`: Step properties (name, script, parallel count, inputs filter)
 - Uses TOML format for declarative configuration
+- Note: A starter step is any step with no inputs (no "inputs" field or empty inputs)
 
 ### 3. **Database (`db.go`)**
 Manages persistent storage with dual-database architecture:
 - **SQLite Database**: 
-  - **steps** table: Stores step definitions with versioning (name, script, version, is_start, parallel, inputs)
+  - **steps** table: Stores step definitions with versioning (name, script, version, parallel, inputs)
   - **tasks** table: Tracks individual task executions (step_id, input_resource_id, processed, error)
   - **resources** table: Metadata for outputs (name, object_hash, created_at)
   - Indexes for efficient queries
@@ -318,7 +319,7 @@ GRIT uses a **resource-based execution model** where data flows through the pipe
 
 3. **Incremental Processing**: The `GetUnconsumedResources()` method finds resources that haven't been processed by a step yet, enabling incremental pipelines.
 
-4. **Seed Tasks**: Start steps (with `start = true`) execute once with no input (`INPUT_FILE` is empty) to bootstrap the pipeline.
+4. **Seed Tasks**: Start steps (steps with no inputs) execute once with no input (`INPUT_FILE` is empty) to bootstrap the pipeline.
 
 5. **Content Deduplication**: Resources with identical content (same SHA-256 hash) are stored only once in BadgerDB, saving disk space.
 
@@ -344,7 +345,7 @@ grit -manifest <path-to-manifest.toml> -db <database-directory> [options]
 - `-db` (default: `./db`): Directory for database and object storage
 - `-run`: Execute the pipeline
 - `-parallel` (default: number of CPUs): Maximum concurrent tasks to execute
-- `-start`: Name of the step to start from (defaults to step with `start=true`)
+- `-start`: Name of the step to start from (defaults to steps with no inputs)
 - `-step`: Filter to specific steps (can be repeated multiple times for multiple steps)
 - `-export`: List all resource hashes for a given resource name
 - `-export-hash`: Stream resource content by hash to stdout (for extracting pipeline outputs)
@@ -358,7 +359,7 @@ Create a TOML file with step definitions:
 ```toml
 [[step]]
 name = "extract"
-start = true
+# No inputs specified - this is a starter step
 script = """
 # Initial step - generates output files (resources)
 curl https://api.example.com/data > $OUTPUT_DIR/data
@@ -431,9 +432,8 @@ The unique constraint on `(step.name, step.version)` ensures each modification c
   - `name`: Step name
   - `script`: Shell script to execute
   - `version`: Auto-incrementing version when script or inputs change
-  - `is_start`: Whether this is the starting step (boolean)
   - `parallel`: Maximum parallel execution limit (0 = unlimited)
-  - `inputs`: Filter for which resource names this step processes
+  - `inputs`: Filter for which resource names this step processes (NULL or empty means this is a starter step)
   - **Unique constraint**: `(name, version)`
 
 - **task**: Task execution instances
@@ -504,7 +504,7 @@ The unique constraint on `(step.name, step.version)` ensures each modification c
 ```toml
 [[step]]
 name = "fetch"
-start = true
+# No inputs specified - this is a starter step
 script = """
 echo 'sample data' > $OUTPUT_DIR/raw-data
 echo 'more samples' > $OUTPUT_DIR/raw-data-2

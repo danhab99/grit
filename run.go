@@ -1,52 +1,43 @@
 package main
 
 import (
-	"slices"
+	"grit/db"
+	"grit/exec"
+	"grit/fuse"
+	"grit/log"
+	"grit/pipeline"
 	"time"
 )
 
-var runLogger = NewLogger("RUN")
+var runLogger = log.NewLogger("RUN")
 
-func run(manifest Manifest, database Database, parallel int, startStepName string, enabledSteps []string) {
-	startTime := time.Now()
-
-	// Register all steps from manifest
-	var steps []Step
-	for _, manifestStep := range manifest.Steps {
-		step := Step{
-			Name:     manifestStep.Name,
-			Script:   manifestStep.Script,
-			IsStart:  manifestStep.Start,
-			Parallel: manifestStep.Parallel,
-			Inputs:   manifestStep.Inputs,
-		}
-
-		id, err := database.CreateStep(step)
-		if err != nil {
-			panic(err)
-		}
-		step.ID = id
-
-		// Filter to enabled steps if specified
-		if len(enabledSteps) > 0 {
-			if slices.Contains(enabledSteps, step.Name) {
-				steps = append(steps, step)
-			}
-		} else {
-			steps = append(steps, step)
-		}
-	}
+func constructRunnerPipeline(manifest Manifest, database db.Database, enabledSteps []string) ([]db.Step, *pipeline.Pipeline) {
+	steps := manifest.RegisterSteps(&database, enabledSteps)
 
 	runLogger.Printf("Registered %d steps\n", len(manifest.Steps))
 
-	// Create pipeline with single FUSE server
-	pipeline, err := NewPipeline(&database)
+	outputChan := make(chan fuse.FileData)
+
+	fuseWatcher, err := fuse.NewTempDirFuseWatcher(outputChan)
 	if err != nil {
 		panic(err)
 	}
-	defer pipeline.fuseWatcher.Stop()
 
-	runLogger.Printf("FUSE server started at: %s\n", pipeline.GetFusePath())
+	executor := exec.NewScriptExecutor(&database, fuseWatcher.GetMountPath(), outputChan)
+
+	// Create pipeline with single FUSE server
+	pipeline, err := pipeline.NewPipeline(executor, &database)
+	if err != nil {
+		panic(err)
+	}
+
+	return steps, pipeline
+}
+
+func run(manifest Manifest, database db.Database, parallel int, enabledSteps []string) {
+	startTime := time.Now()
+
+	steps, pipeline := constructRunnerPipeline(manifest, database, enabledSteps)
 
 	// Check if we need to seed
 	resourceCount, err := database.CountResources()
@@ -54,58 +45,18 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 		panic(err)
 	}
 
+	// Execute all steps
+	var totalExecutions int64
+
 	if resourceCount == 0 {
-		runLogger.Printf("No resources found, running seed step\n")
-		startStep, err := database.GetStartingStep()
-		if err != nil {
-			panic(err)
-		}
-		if startStep == nil {
-			panic("no start step found in manifest")
-		}
+		runLogger.Printf("No resources found, running seed steps\n")
 
-		// Create and execute seed task
-		seedTask := Task{
-			StepID:          startStep.ID,
-			InputResourceID: nil,
-			Processed:       false,
-		}
-		seedTaskID, err := database.CreateTask(seedTask)
-		if err != nil {
-			panic(err)
-		}
-		seedTask.ID = seedTaskID
-
-		outputChan := database.MakeResourceConsumer()
-
-		executor := NewScriptExecutor(&database, pipeline)
-		execErr := executor.Execute(seedTask, *startStep, outputChan)
-
-		close(outputChan)
-
-		var errorMsg *string
-		if execErr != nil {
-			msg := execErr.Error()
-			errorMsg = &msg
-			runLogger.Printf("Seed task failed: %v\n", execErr)
-		}
-
-		err = database.UpdateTaskStatus(seedTask.ID, true, errorMsg)
-		if err != nil {
-			panic(err)
-		}
-
-		if execErr == nil {
-			runLogger.Verbosef("Seed task completed\n")
-		}
-
-		if len(steps) >= 1 {
-			database.ScheduleTasksForStep(steps[1].ID)
+		for step := range database.GetStepsWithZeroInputs() {
+			totalExecutions += pipeline.ExecuteStep(step, parallel)
 		}
 	}
 
-	// Execute all steps
-	var totalExecutions int64
+	// run twice to check that everything is done
 	for range 2 {
 		for _, step := range steps {
 			executions := pipeline.ExecuteStep(step, parallel)
@@ -116,7 +67,6 @@ func run(manifest Manifest, database Database, parallel int, startStepName strin
 			}
 		}
 	}
-
 
 	duration := time.Since(startTime)
 	runLogger.Printf("Pipeline complete: %d tasks executed in %s\n", totalExecutions, duration.Round(time.Millisecond))
