@@ -1,15 +1,56 @@
-package main
+// Description: Export resources from the database
+package export
 
 import (
+	"flag"
 	"fmt"
 	"os"
+
+	"grit/db"
+	"grit/log"
 
 	"github.com/fatih/color"
 )
 
-var exportLogger = NewLogger("EXPORT")
+var exportLogger = log.NewLogger("EXPORT")
 
-func exportResourcesByName(database Database, resourceName string) {
+// Command flags
+var (
+	dbPath *string
+	name   *string
+	hash   *string
+)
+
+// RegisterFlags sets up the flags for the export command
+func RegisterFlags(fs *flag.FlagSet) {
+	dbPath = fs.String("db", "./db", "database path")
+	name = fs.String("name", "", "list resource hashes by name")
+	hash = fs.String("hash", "", "export file content by hash")
+}
+
+// Execute runs the export command
+func Execute() {
+	if (*name == "" && *hash == "") || (*name != "" && *hash != "") {
+		fmt.Fprintf(os.Stderr, "Error: specify exactly one of -name or -hash\n")
+		os.Exit(1)
+	}
+
+	exportLogger.Printf("Initializing database at: %s\n", *dbPath)
+	database, err := db.NewDatabase(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening database: %v\n", err)
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	if *name != "" {
+		exportResourcesByName(database, *name)
+	} else if *hash != "" {
+		exportResourceByHash(database, *hash)
+	}
+}
+
+func exportResourcesByName(database db.Database, resourceName string) {
 	exportLogger.Printf("Listing resources with name: %s\n", color.MagentaString(resourceName))
 
 	// List all resources with the given name
@@ -28,7 +69,7 @@ func exportResourcesByName(database Database, resourceName string) {
 	}
 }
 
-func exportResourceByHash(database Database, hash string) {
+func exportResourceByHash(database db.Database, hash string) {
 	exportLogger.Printf("Exporting resource with hash: %s\n", color.MagentaString(hash[:16]+"..."))
 
 	// Check if object exists
@@ -46,6 +87,6 @@ func exportResourceByHash(database Database, hash string) {
 
 	// Write raw content to stdout
 	os.Stdout.Write(data)
-	
+
 	exportLogger.Printf("Exported %d bytes\n", len(data))
 }
