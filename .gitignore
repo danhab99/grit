@@ -1,6 +1,5 @@
 task-pipeline
 grit
-*.sh
 vendor
 result
 
