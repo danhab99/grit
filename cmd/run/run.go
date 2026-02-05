@@ -11,7 +11,7 @@ import (
 
 var runLogger = log.NewLogger("RUN")
 
-func constructRunnerPipeline(manifest Manifest, database db.Database, enabledSteps []string) ([]db.Step, *pipeline.Pipeline) {
+func constructRunnerPipeline(manifest Manifest, database db.Database, enabledSteps []string) ([]db.Step, *pipeline.Pipeline, *fuse.FuseWatcher, func()) {
 	steps := manifest.RegisterSteps(&database, enabledSteps)
 
 	runLogger.Printf("Registered %d steps\n", len(manifest.Steps))
@@ -31,13 +31,17 @@ func constructRunnerPipeline(manifest Manifest, database db.Database, enabledSte
 		panic(err)
 	}
 
-	return steps, pipeline
+	return steps, pipeline, fuseWatcher, func() {
+		fuseWatcher.Stop()
+		fuseWatcher.WaitForWrites()
+	}
 }
 
 func run(manifest Manifest, database db.Database, parallel int, enabledSteps []string) {
 	startTime := time.Now()
 
-	steps, pipeline := constructRunnerPipeline(manifest, database, enabledSteps)
+	steps, pipeline, fuseWatcher, stop := constructRunnerPipeline(manifest, database, enabledSteps)
+	defer stop()
 
 	// Check if we need to seed
 	resourceCount, err := database.CountResources()
@@ -65,6 +69,7 @@ func run(manifest Manifest, database db.Database, parallel int, enabledSteps []s
 			if executions > 0 {
 				runLogger.Printf("Step %s: executed %d tasks\n", step.Name, executions)
 			}
+			fuseWatcher.WaitForWrites()
 		}
 	}
 
