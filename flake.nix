@@ -13,7 +13,7 @@
         };
         lib = pkgs.lib;
 
-        grit = import ./lib.nix { inherit lib; };
+        grit = import ./nix/lib.nix { inherit lib; };
       in
       {
         packages = {
@@ -39,6 +39,7 @@
             sqlite-web
             pandoc
             texliveFull
+            just
           ];
 
           shellHook = ''

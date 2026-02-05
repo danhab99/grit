@@ -8,7 +8,6 @@ in rec {
     }: trimmed_string_both ( builtins.concatStringsSep "\n" steps);
 
   mkStep = args@{ name
-    , isStart ? false
     , script
     , parallel
     , inputs ? [ ]
@@ -23,7 +22,6 @@ name=\"${name}\"
 script=''''
 ${script}
 ''''
-${if isStart then "start=true" else ""}
 ${if ( isAttrSet "parallel" ) then "parallel=${builtins.toString parallel}" else ""}
 ${if ( isAttrSet "inputs" ) then "inputs=[${builtins.concatStringsSep ", " (builtins.map (x: "\"${x}\"") inputs)}]" else ""}
     '';
