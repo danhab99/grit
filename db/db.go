@@ -93,41 +93,12 @@ func NewDatabase(repo_path string) (Database, error) {
 	return Database{db, repo_path, badgerDB}, nil
 }
 
-// Step CRUD operations
-
-// Resource CRUD operations
-
-// CreateResourceFromReader reads data from an io.Reader, stores it in BadgerDB, and creates a resource record in SQLite.
-// Returns the resource ID and the calculated hash.
-
-// GetTaskInputResource returns the input resource for a task (if any)
-
-// Task CRUD operations
-
-// CreateTasksFromResources creates tasks for a given step from a set of input resources.
-// Each resource will create a unique task (step_id, input_resource_id is unique).
-// Returns the created task IDs.
-
-// ScheduleTasksForStep creates tasks for all unconsumed resources matching the step's inputs.
-// Uses a single SQL INSERT to efficiently schedule all tasks at once.
-// Returns the number of new tasks created.
-
-// Relational operators
-
-// GetTaskCountsForStep returns (total tasks, processed tasks) for a given step
-
-// Utility functions
-
-// StoreObject stores object data in BadgerDB
-
-// StoreObjectBatch stores multiple objects in a single batch (much faster)
-
-// GetObject retrieves object data from BadgerDB
-
-// GetObjectBatch retrieves multiple objects in a single transaction (faster for sequential reads)
-
-// ObjectExists checks if an object exists in BadgerDB
-
-// ForceSaveWAL performs a WAL checkpoint to ensure data is persisted to the database file
-
-// Close closes both SQLite and BadgerDB connections
+func (d Database) Close() error {
+	if err := d.db.Close(); err != nil {
+		return fmt.Errorf("failed to close SQLite: %w", err)
+	}
+	if err := d.badgerDB.Close(); err != nil {
+		return fmt.Errorf("failed to close BadgerDB: %w", err)
+	}
+	return nil
+}

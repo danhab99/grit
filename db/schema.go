@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS step (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   name      TEXT NOT NULL,
   script    TEXT NOT NULL,
-  is_start  INTEGER DEFAULT 0,
   parallel  INTEGER,
   inputs    TEXT,
   version   INTEGER DEFAULT 1,
@@ -57,7 +56,6 @@ type Step struct {
 	ID       int64
 	Name     string
 	Script   string
-	IsStart  bool
 	Parallel *int
 	Inputs   []string
 	Version  int
