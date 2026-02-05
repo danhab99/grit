@@ -1,7 +1,8 @@
-package main
+package fuse
 
 import (
 	"bytes"
+	"grit/log"
 	"io"
 	"os"
 	"sync"
@@ -34,7 +35,7 @@ type fileData struct {
 	mu      sync.Mutex
 }
 
-var fuseLogger = NewLogger("FUSE")
+var fuseLogger = log.NewLogger("FUSE")
 
 // NewFuseWatcher creates a new FUSE watcher that mounts at the specified path
 // Backpressure is controlled by the capacity of outputChan

@@ -1,31 +1,52 @@
-package main
+package exec
 
 import (
 	"bufio"
 	"fmt"
+	"grit/db"
+	"grit/fuse"
+	"grit/log"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/danhab99/idk/workers"
 )
 
 type ScriptExecutor struct {
-	db       *Database
-	pipeline *Pipeline
+	db         *db.Database
+	mountPath  string
+	outputChan chan fuse.FileData
 }
 
-func NewScriptExecutor(db *Database, pipeline *Pipeline) *ScriptExecutor {
-	return &ScriptExecutor{
-		db:       db,
-		pipeline: pipeline,
-	}
+func NewScriptExecutor(db *db.Database, mountPath string, outputChan chan fuse.FileData) *ScriptExecutor {
+	return &ScriptExecutor{db, mountPath, outputChan}
 }
 
-var executeLogger = NewLogger("EXEC")
+var executeLogger = log.NewLogger("EXEC")
 
-func (e *ScriptExecutor) Execute(task Task, step Step, outputChan chan FileData) error {
+// func (e *ScriptExecutor) ExecuteStep(step db.Step, defaultParallel int) error {
+// 	database := e.db
+// 	executeLogger.Println("Running unfinished tasks for step", step.Name)
+
+// 	p := defaultParallel
+// 	if step.Parallel != nil {
+// 		p = min(defaultParallel, *step.Parallel)
+// 	}
+
+// 	workers.Parallel0(database.GetUnprocessedTasks(step.ID), p, func(task db.Task) {
+// 		err := e.Execute(task, step)
+// 		if err != nil {
+// 			panic(err)
+// 		}
+// 	})
+
+// 	return nil
+// }
+
+func (e *ScriptExecutor) Execute(task db.Task, step db.Step) error {
 	// executeLogger.Printf("Executing task ID=%d for step '%s' (step_id=%d)\n", task.ID, step.Name, task.StepID)
-
 	start := time.Now()
 
 	// Create input file
@@ -43,20 +64,20 @@ func (e *ScriptExecutor) Execute(task Task, step Step, outputChan chan FileData)
 
 	// Execute the script
 	executeLogger.Verbosef("Executing: %s\n", step.Script)
-	cmd := e.buildCommand(step, inputFile.Name(), e.pipeline.fuseWatcher.mountPath)
+	cmd := e.buildCommand(step, inputFile.Name(), e.mountPath)
 
 	// Run script and capture output
 	if err := e.runScript(cmd, step); err != nil {
 		return err
 	}
 
-	elapsedTime := time.Now().Sub(start)
+	elapsedTime := time.Since(start)
 
 	executeLogger.Printf("Executed task ID=%d for step '%s' successfully in %s\n", task.ID, step.Name, elapsedTime.String())
 	return nil
 }
 
-func (e *ScriptExecutor) prepareInput(task Task, inputFile *os.File) error {
+func (e *ScriptExecutor) prepareInput(task db.Task, inputFile *os.File) error {
 	// Get input resource if task has one
 	if task.InputResourceID != nil {
 		inputResource, err := e.db.GetResource(*task.InputResourceID)
@@ -81,7 +102,7 @@ func (e *ScriptExecutor) prepareInput(task Task, inputFile *os.File) error {
 	return nil
 }
 
-func (e *ScriptExecutor) buildCommand(step Step, inputFile, outputDir string) *exec.Cmd {
+func (e *ScriptExecutor) buildCommand(step db.Step, inputFile, outputDir string) *exec.Cmd {
 	cmd := exec.Command("sh", "-c", step.Script)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("INPUT_FILE=%s", inputFile),
@@ -90,7 +111,7 @@ func (e *ScriptExecutor) buildCommand(step Step, inputFile, outputDir string) *e
 	return cmd
 }
 
-func (e *ScriptExecutor) runScript(cmd *exec.Cmd, step Step) error {
+func (e *ScriptExecutor) runScript(cmd *exec.Cmd, step db.Step) error {
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
@@ -106,7 +127,7 @@ func (e *ScriptExecutor) runScript(cmd *exec.Cmd, step Step) error {
 		return fmt.Errorf("failed to start script: %w", err)
 	}
 
-	scriptLogger := NewLogger(fmt.Sprintf("SCRIPT:%s ", step.Name))
+	scriptLogger := executeLogger.Context(step.Name)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
