@@ -8,8 +8,6 @@ import (
 
 	"grit/db"
 	"grit/log"
-
-	"github.com/danhab99/idk/chans"
 )
 
 var exportLogger = log.NewLogger("EXPORT")

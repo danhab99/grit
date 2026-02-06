@@ -5,7 +5,6 @@ import (
 
 	"grit/db"
 
-	"github.com/danhab99/idk/chans"
 	"github.com/fatih/color"
 )
 
