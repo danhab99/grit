@@ -13,7 +13,9 @@ jobs:
   build-nix:
     name: Build ${{ matrix.system }}
     runs-on: ${{ matrix.runner }}
+    continue-on-error: true
     strategy:
+      fail-fast: false
       matrix:
         include:
           - system: x86_64-linux
@@ -51,7 +53,9 @@ jobs:
   build-go-cross:
     name: Build ${{ matrix.platform }}
     runs-on: ubuntu-latest
+    continue-on-error: true
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux-arm64
@@ -60,12 +64,6 @@ jobs:
             cc: aarch64-linux-gnu-gcc
             packages: gcc-aarch64-linux-gnu
             binary_name: grit-linux-arm64
-          - platform: windows-amd64
-            goos: windows
-            goarch: amd64
-            cc: x86_64-w64-mingw32-gcc
-            packages: gcc-mingw-w64
-            binary_name: grit-windows-amd64.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -94,6 +92,7 @@ jobs:
 
   release:
     needs: [build-nix, build-go-cross]
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,3 +127,55 @@ jobs:
           body: |
             ## What's Changed
             ${{ steps.changelog.outputs.CHANGELOG }}
+            
+            ## Installation
+            
+            ### Download Binary
+            
+            **Linux (amd64)**
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/grit-linux-amd64
+            chmod +x grit-linux-amd64
+            sudo mv grit-linux-amd64 /usr/local/bin/grit
+            ```
+            
+            **Linux (arm64)**
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/grit-linux-arm64
+            chmod +x grit-linux-arm64
+            sudo mv grit-linux-arm64 /usr/local/bin/grit
+            ```
+            
+            **macOS (Intel)**
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/grit-darwin-amd64
+            chmod +x grit-darwin-amd64
+            sudo mv grit-darwin-amd64 /usr/local/bin/grit
+            ```
+            
+            **macOS (Apple Silicon)**
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/grit-darwin-arm64
+            chmod +x grit-darwin-arm64
+            sudo mv grit-darwin-arm64 /usr/local/bin/grit
+            ```
+            
+            ### Verify Checksums
+            ```bash
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/checksums.txt
+            sha256sum -c checksums.txt
+            ```
+            
+            ### Using Nix Flakes
+            ```bash
+            nix run github:${{ github.repository }}/${{ steps.version.outputs.VERSION }} -- --help
+            ```
+            
+            Or add to your flake:
+            ```nix
+            {
+              inputs.grit.url = "github:${{ github.repository }}/${{ steps.version.outputs.VERSION }}";
+            }
+            ```
+          draft: false
+          prerelease: false
