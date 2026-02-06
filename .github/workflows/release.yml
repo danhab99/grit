@@ -3,163 +3,128 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*'
+      - '*'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+  build-nix:
+    name: Build ${{ matrix.system }}
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
-          - os: linux
-            arch: amd64
+          - system: x86_64-linux
             runner: ubuntu-latest
-          - os: linux
-            arch: arm64
-            runner: ubuntu-latest
-          - os: darwin
-            arch: amd64
+            binary_name: grit-linux-amd64
+          - system: x86_64-darwin
             runner: macos-13
-          - os: darwin
-            arch: arm64
+            binary_name: grit-darwin-amd64
+          - system: aarch64-darwin
             runner: macos-14
-          - os: windows
-            arch: amd64
-            runner: ubuntu-latest
+            binary_name: grit-darwin-arm64
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: cachix/install-nix-action@v24
         with:
-          go-version-file: 'go.mod'
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
 
-      - name: Get version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      - name: Build with Nix
+        run: nix build .#packages.${{ matrix.system }}.default -L
 
-      - name: Build binary
-        env:
-          GOOS: ${{ matrix.os }}
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 1
+      - name: Package binary
         run: |
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            sudo apt-get update && sudo apt-get install -y gcc-mingw-w64
-            export CC=x86_64-w64-mingw32-gcc
-            export CGO_ENABLED=1
-            go build -o task-pipeline-${{ matrix.os }}-${{ matrix.arch }}.exe -ldflags="-s -w" .
-          elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
-            sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-            export CC=aarch64-linux-gnu-gcc
-            go build -o task-pipeline-${{ matrix.os }}-${{ matrix.arch }} -ldflags="-s -w" .
-          else
-            go build -o task-pipeline-${{ matrix.os }}-${{ matrix.arch }} -ldflags="-s -w" .
-          fi
+          cp result/bin/grit ${{ matrix.binary_name }}
+          chmod +x ${{ matrix.binary_name }}
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: task-pipeline-${{ matrix.os }}-${{ matrix.arch }}
-          path: task-pipeline-${{ matrix.os }}-${{ matrix.arch }}*
+          name: ${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
+          retention-days: 1
+
+  build-go-cross:
+    name: Build ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - platform: linux-arm64
+            goos: linux
+            goarch: arm64
+            cc: aarch64-linux-gnu-gcc
+            packages: gcc-aarch64-linux-gnu
+            binary_name: grit-linux-arm64
+          - platform: windows-amd64
+            goos: windows
+            goarch: amd64
+            cc: x86_64-w64-mingw32-gcc
+            packages: gcc-mingw-w64
+            binary_name: grit-windows-amd64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install cross tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+        run: go build -o ${{ matrix.binary_name }} -ldflags="-s -w"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
           retention-days: 1
 
   release:
-    name: Create Release
-    needs: build
+    needs: [build-nix, build-go-cross]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Get version from tag
-        id: get_version
+      - name: Get version
+        id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - name: Generate changelog
+        id: changelog
+        run: |
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          cat changelog/*.md | grep -v '^#' >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: List artifacts
-        run: ls -lh dist/
-
-      - name: Create checksums
+      - name: Checksums
         run: |
           cd dist
-          sha256sum task-pipeline-* > checksums.txt
-          cat checksums.txt
+          sha256sum grit-* > checksums.txt
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            dist/task-pipeline-*
+            dist/grit-*
             dist/checksums.txt
           body: |
-            ## Installation
-            
-            ### Download Binary
-            
-            **Linux (amd64)**
-            ```bash
-            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.VERSION }}/task-pipeline-linux-amd64
-            chmod +x task-pipeline-linux-amd64
-            sudo mv task-pipeline-linux-amd64 /usr/local/bin/task-pipeline
-            ```
-            
-            **Linux (arm64)**
-            ```bash
-            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.VERSION }}/task-pipeline-linux-arm64
-            chmod +x task-pipeline-linux-arm64
-            sudo mv task-pipeline-linux-arm64 /usr/local/bin/task-pipeline
-            ```
-            
-            **macOS (Intel)**
-            ```bash
-            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.VERSION }}/task-pipeline-darwin-amd64
-            chmod +x task-pipeline-darwin-amd64
-            sudo mv task-pipeline-darwin-amd64 /usr/local/bin/task-pipeline
-            ```
-            
-            **macOS (Apple Silicon)**
-            ```bash
-            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.VERSION }}/task-pipeline-darwin-arm64
-            chmod +x task-pipeline-darwin-arm64
-            sudo mv task-pipeline-darwin-arm64 /usr/local/bin/task-pipeline
-            ```
-            
-            **Windows (amd64)**
-            ```powershell
-            Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.VERSION }}/task-pipeline-windows-amd64.exe" -OutFile "task-pipeline.exe"
-            ```
-            
-            ### Verify Checksums
-            ```bash
-            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.VERSION }}/checksums.txt
-            sha256sum -c checksums.txt
-            ```
-            
-            ### Using Nix Flakes
-            ```bash
-            nix run github:${{ github.repository }}/${{ steps.get_version.outputs.VERSION }} -- --help
-            ```
-            
-            Or add to your flake:
-            ```nix
-            {
-              inputs.task-pipeline.url = "github:${{ github.repository }}/${{ steps.get_version.outputs.VERSION }}";
-            }
-            ```
-          draft: false
-          prerelease: false
-
-
+            ## What's Changed
+            ${{ steps.changelog.outputs.CHANGELOG }}

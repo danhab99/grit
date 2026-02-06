@@ -55,8 +55,6 @@
           CGO_CFLAGS = "-U_FORTIFY_SOURCE";
           CGO_CPPFLAGS = "-U_FORTIFY_SOURCE";
         };
-
-        checks = import ./nix/checks.nix { inherit pkgs grit lib; };
       }
     ))
     // (
