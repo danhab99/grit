@@ -17,22 +17,10 @@
       in
       {
         packages = {
-          default = pkgs.buildGoModule rec {
+          default = pkgs.buildGoModule {
             pname = "grit";
             version = "0.2.2";
-            
-            # Generate main.go from cmd/ directory
-            src = 
-              let
-                genMain = import ./nix/gen-main.nix { inherit lib pkgs; };
-                generatedMain = genMain.generateMainGo ./cmd;
-              in
-                pkgs.runCommand "grit-src" {} ''
-                  cp -r ${self} $out
-                  chmod -R u+w $out
-                  echo '${generatedMain}' > $out/main.go
-                '';
-            
+            src = self;
             vendorHash = "sha256-NEWUHUio0oPZdSB9obpZEOD5RQcIsAwnosQg2yESXME=";
             subPackages = [ "." ];
 
@@ -69,11 +57,7 @@
           config.allowUnfree = true;
         };
         lib = pkgs.lib;
-        genMain = import ./nix/gen-main.nix { inherit lib pkgs; };
       in {
-        lib = (import ./nix/lib.nix { inherit lib pkgs; }) // {
-          # Expose main.go generator
-          generate-main = genMain.generateMainGo;
-        };
+        lib = import ./lib.nix { inherit lib pkgs; };
       });
 }
