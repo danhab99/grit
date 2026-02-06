@@ -11,17 +11,24 @@ in
       let
 
         expectedFile = pkgs.writeText "expected" (''
-[[step]]
-name="test"
-script=''''
-echo hi
-''''
+          [[step]]
+          name="test"
+          script=''''
+          echo hi
+          ''''
 
-parallel=1
+          parallel=1
         '');
 
-        step1 = grit.mkStep { name = "test"; script = "echo hi"; parallel = 1; };
-        pipeline = grit.mkGritPipeline { name = "testpipeline"; steps = [ step1 ]; };
+        step1 = grit.mkStep {
+          name = "test";
+          script = "echo hi";
+          parallel = 1;
+        };
+        pipeline = grit.mkGritPipeline {
+          name = "testpipeline";
+          steps = [ step1 ];
+        };
       in
       ''
         expected=$(cat ${expectedFile})
