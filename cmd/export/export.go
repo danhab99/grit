@@ -27,13 +27,13 @@ func RegisterFlags(fs *flag.FlagSet) {
 	name = fs.String("name", "", "list resource hashes by name")
 	hash = fs.String("hash", "", "export file content by hash")
 	tarOut = fs.String("tar", "export.tar.gz", "export file content by hash")
-	compressed = fs.Bool("--compressed", true, "Compress the tarball")
+	compressed = fs.Bool("compressed", true, "Compress the tarball")
 }
 
 // Execute runs the export command
 func Execute() {
-	if (*name == "" && *hash == "") || (*name != "" && *hash != "") {
-		fmt.Fprintf(os.Stderr, "Error: specify exactly one of -name or -hash\n")
+	if *name == "" && *hash == ""  && *tarOut == "" {
+		fmt.Fprintf(os.Stderr, "Error: specify exactly one of -name or -hash -tar\n")
 		os.Exit(1)
 	}
 

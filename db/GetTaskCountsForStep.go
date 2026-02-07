@@ -4,7 +4,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func (d Database) GetTaskCountsForStep(stepID int64) (int64, int64, error) {
+func (d Database) GetTaskCountsForStep(stepID int64) (total int64, processed int64, err error) {
 	totalTasks, err := d.CountTasksForStep(stepID)
 	if err != nil {
 		return 0, 0, err

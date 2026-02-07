@@ -14,7 +14,7 @@ import (
 
 func exportTarball(database db.Database, outputPath string, compressed bool, resourceNames []string) {
 
-	outFile, err := os.Open(outputPath)
+	outFile, err := os.Create(outputPath)
 	if err != nil {
 		panic(err)
 	}
