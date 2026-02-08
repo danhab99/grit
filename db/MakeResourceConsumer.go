@@ -36,8 +36,7 @@ func (db Database) MakeResourceConsumer() chan fuse.FileData {
 			resourceName := strings.Split(fd.Name, "_")[0]
 			data, err := io.ReadAll(fd.Reader)
 			if err != nil {
-				dbLogger.Verbosef("Error reading file %s: %v\n", fd.Name, err)
-				return
+				panic(err)
 			}
 
 			// Compute hash
@@ -63,7 +62,8 @@ func (db Database) MakeResourceConsumer() chan fuse.FileData {
 		workers.Parallel0(storeChan, numStoreWorkers, func(s storeJob) {
 			if !db.ObjectExists(s.hash) {
 				if err := db.StoreObject(s.hash, s.data); err != nil {
-					dbLogger.Verbosef("Error storing object %s: %v\n", s.hash[:16]+"...", err)
+					panic(err)
+					// dbLogger.Verbosef("Error storing object %s: %v\n", s.hash[:16]+"...", err)
 				}
 			}
 		})
@@ -74,8 +74,9 @@ func (db Database) MakeResourceConsumer() chan fuse.FileData {
 	go func() {
 		workers.Parallel0(dbJobChan, numDBWorkers, func(j dbJob) {
 			if _, err := db.CreateResource(j.name, j.hash); err != nil {
-				dbLogger.Verbosef("Error creating resource %s: %v\n", j.name, err)
-				return
+				panic(err)
+				// dbLogger.Verbosef("Error creating resource %s: %v\n", j.name, err)
+				// return
 			}
 			dbLogger.Verbosef("Created resource %s (hash: %s)\n", j.name, j.hash[:16]+"...")
 		})
