@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"grit/db"
-	"grit/fuse"
 	"grit/log"
 	"os"
 	"os/exec"
@@ -15,11 +14,10 @@ import (
 type ScriptExecutor struct {
 	db         *db.Database
 	mountPath  string
-	outputChan chan fuse.FileData
 }
 
-func NewScriptExecutor(db *db.Database, mountPath string, outputChan chan fuse.FileData) *ScriptExecutor {
-	return &ScriptExecutor{db, mountPath, outputChan}
+func NewScriptExecutor(db *db.Database, mountPath string) *ScriptExecutor {
+	return &ScriptExecutor{db, mountPath}
 }
 
 var executeLogger = log.NewLogger("EXEC")

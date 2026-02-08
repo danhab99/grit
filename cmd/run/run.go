@@ -90,14 +90,14 @@ func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledS
 
 	runLogger.Printf("Registered %d steps\n", len(m.Steps))
 
-	outputChan := make(chan fuse.FileData)
+	outputChan := database.MakeResourceConsumer()
 
 	fuseWatcher, err := fuse.NewTempDirFuseWatcher(outputChan)
 	if err != nil {
 		panic(err)
 	}
 
-	executor := exec.NewScriptExecutor(&database, fuseWatcher.GetMountPath(), outputChan)
+	executor := exec.NewScriptExecutor(&database, fuseWatcher.GetMountPath())
 
 	// Create pipeline with single FUSE server
 	pipeline, err := pipeline.NewPipeline(executor, &database)
