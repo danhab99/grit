@@ -25,6 +25,39 @@ func NewPipeline(executor *exec.ScriptExecutor, database *db.Database) (*Pipelin
 func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
 	database := p.database
 
+	if len(step.Inputs) == 0 {
+		pipelineLogger.Printf("Executing seed step %s\n", step.Name)
+
+		var startTask db.Task
+
+		startStepCount, err := database.CountTasksForStep(step.ID)
+		if err != nil {
+			panic(err)
+		}
+
+		if startStepCount > 0 {
+			startTask = <-database.GetTasksForStep(step.ID)
+		} else {
+			t, err := database.CreateAndGetTask(db.Task{
+				StepID: step.ID,
+			})
+			if err != nil {
+				panic(err)
+			}
+			startTask = *t
+		}
+
+		if !startTask.Processed {
+			err = p.executor.Execute(startTask, step)
+			if err != nil {
+				panic(err)
+			}
+			return 1
+		}
+
+		return 0
+	}
+
 	// Schedule new tasks for this step
 	tasksCreated, err := database.ScheduleTasksForStep(step.ID)
 	if err != nil {
