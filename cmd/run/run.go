@@ -134,6 +134,15 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 		}
 	}
 
+	resourceCount, err = database.CountResources()
+	if err != nil {
+		panic(err)
+	}
+
+	if resourceCount == 0 {
+		panic("No resources were seeded")
+	}
+
 	// run twice to check that everything is done
 	for range 2 {
 		for _, step := range steps {
