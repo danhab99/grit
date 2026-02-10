@@ -5,14 +5,18 @@ import (
 )
 
 func (d Database) CreateResource(name string, objectHash string) (int64, error) {
+	return d.CreateResourceWithTask(name, objectHash, nil)
+}
+
+func (d Database) CreateResourceWithTask(name string, objectHash string, createdByTaskID *int64) (int64, error) {
 	// Use an upsert-like pattern to make this safe under concurrency:
 	// INSERT ... ON CONFLICT DO NOTHING, then SELECT the id. This avoids
 	// races where two goroutines attempt to insert the same resource.
 	_, err := d.db.Exec(`
-INSERT INTO resource (name, object_hash)
-VALUES (?, ?)
+INSERT INTO resource (name, object_hash, created_by_task_id)
+VALUES (?, ?, ?)
 ON CONFLICT(name, object_hash) DO NOTHING
-`, name, objectHash)
+`, name, objectHash, createdByTaskID)
 	if err != nil {
 		return 0, err
 	}

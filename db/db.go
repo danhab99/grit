@@ -98,6 +98,7 @@ func NewDatabase(repo_path string) (Database, error) {
 		<-c
 		db.Close()
 		badgerDB.Close()
+		os.Exit(0)
 	}()
 
 	return Database{db, repo_path, badgerDB}, nil

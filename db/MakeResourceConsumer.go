@@ -6,34 +6,42 @@ import (
 	"grit/fuse"
 	"io"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/danhab99/idk/workers"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 func (db Database) MakeResourceConsumer() chan fuse.FileData {
-	outputChan := make(chan fuse.FileData, 100) // Buffered to prevent deadlock
+	inputChan := make(chan fuse.FileData, 100) // Buffered to prevent deadlock
 
-	// Jobs for background storage and DB insert
-	type storeJob struct {
-		hash string
-		data []byte
-		name string
-	}
-	type dbJob struct {
-		name string
-		hash string
-	}
-
-	storeChan := make(chan storeJob, runtime.NumCPU())
-	dbJobChan := make(chan dbJob, 100)
-
-	// Worker pool: read FileData, compute hash, and dispatch store + db jobs using workers.Parallel0
+	// Process FileData directly in the worker pool: compute hash, store object and
+	// insert resource record immediately. This avoids any channel-based batching
+	// or buffering for downstream storage/DB workers.
+	// Worker pool: read FileData, compute hash, store object if needed, and create resource
 	numWorkers := runtime.NumCPU()
 	go func() {
-		workers.Parallel0(outputChan, numWorkers, func(fd fuse.FileData) {
-			resourceName := strings.Split(fd.Name, "_")[0]
+		workers.Parallel0(inputChan, numWorkers, func(fd fuse.FileData) {
+			// Parse path: "task_N/filename" or just "filename"
+			var taskID *int64
+			filename := fd.Name
+
+			pathParts := strings.Split(fd.Name, "/")
+			if len(pathParts) > 1 {
+				// Has directory structure: extract task ID from "task_N"
+				taskDir := pathParts[0]
+				filename = pathParts[len(pathParts)-1]
+
+				if strings.HasPrefix(taskDir, "task_") {
+					if id, err := strconv.ParseInt(strings.TrimPrefix(taskDir, "task_"), 10, 64); err == nil {
+						taskID = &id
+					}
+				}
+			}
+
+			resourceName := strings.Split(filename, "_")[0]
 			data, err := io.ReadAll(fd.Reader)
 			if err != nil {
 				panic(err)
@@ -44,43 +52,35 @@ func (db Database) MakeResourceConsumer() chan fuse.FileData {
 			hasher.Write(data)
 			hash := hex.EncodeToString(hasher.Sum(nil))
 
-			// Enqueue store job; if storeChan is full, spawn a goroutine so the worker doesn't block
-			storeChan <- storeJob{hash: hash, data: data, name: fd.Name}
-
-			// Enqueue DB job (should be quick)
-			dbJobChan <- dbJob{name: resourceName, hash: hash}
-		})
-
-		// When output processing finishes, close the downstream channels
-		close(storeChan)
-		close(dbJobChan)
-	}()
-
-	// Store workers using workers.Parallel0
-	numStoreWorkers := 2
-	go func() {
-		workers.Parallel0(storeChan, numStoreWorkers, func(s storeJob) {
-			if !db.ObjectExists(s.hash) {
-				if err := db.StoreObject(s.hash, s.data); err != nil {
+			// Store object if it doesn't already exist
+			if !db.ObjectExists(hash) {
+				if err := db.StoreObject(hash, data); err != nil {
 					panic(err)
-					// dbLogger.Verbosef("Error storing object %s: %v\n", s.hash[:16]+"...", err)
 				}
 			}
-		})
-	}()
 
-	// DB inserter (parallel workers to improve SQLite concurrency)
-	numDBWorkers := runtime.NumCPU()
-	go func() {
-		workers.Parallel0(dbJobChan, numDBWorkers, func(j dbJob) {
-			if _, err := db.CreateResource(j.name, j.hash); err != nil {
-				panic(err)
-				// dbLogger.Verbosef("Error creating resource %s: %v\n", j.name, err)
-				// return
+			// Insert resource record (with retries)
+			if _, err := db.CreateResourceWithTask(resourceName, hash, taskID); err != nil {
+				const maxRetries = 3
+				var err2 error
+				for attempt := 1; attempt <= maxRetries; attempt++ {
+					_, err2 = db.CreateResourceWithTask(resourceName, hash, taskID)
+					if err2 == nil {
+						break
+					}
+					dbLogger.Println("Error while trying to create resource", err2, attempt)
+					if attempt < maxRetries {
+						time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+					}
+				}
+				if err2 != nil {
+					panic(err2)
+				}
 			}
-			dbLogger.Verbosef("Created resource %s (hash: %s)\n", j.name, j.hash[:16]+"...")
+
+			dbLogger.Verbosef("Created resource %s (hash: %s)\n", resourceName, hash[:16]+"...")
 		})
 	}()
 
-	return outputChan
+	return inputChan
 }

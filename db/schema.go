@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+
 	badger "github.com/dgraph-io/badger/v4"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -35,8 +36,10 @@ CREATE TABLE IF NOT EXISTS resource (
   name             TEXT NOT NULL,
   object_hash      VARCHAR(64) NOT NULL,
   created_at       TEXT DEFAULT (CURRENT_TIMESTAMP),
+  created_by_task_id INTEGER,
 
-  UNIQUE(name, object_hash)
+  UNIQUE(name, object_hash),
+  FOREIGN KEY(created_by_task_id) REFERENCES task(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_step_name ON step(name);
