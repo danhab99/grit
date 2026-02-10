@@ -3,6 +3,7 @@ package fuse
 import (
 	"bytes"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -80,9 +81,31 @@ type fuseFS struct {
 
 func (fs *fuseFS) GetAttr(name string, context *fuse.Context) (*fuse.Attr, fuse.Status) {
 	if name == "" {
-		// Root directory - write-only, no read/list permissions
+		// Root directory - write-only
 		return &fuse.Attr{
-			Mode: fuse.S_IFDIR | 0200, // Write-only directory
+			Mode: fuse.S_IFDIR | 0200,
+		}, fuse.OK
+	}
+
+	// If the path contains a slash (e.g., "task_1/upper"), prefer treating it as a file path.
+	// If the file exists, return file attributes. If it doesn't, return ENOENT so the kernel
+	// can proceed with creation (Create will be called).
+	if strings.Contains(name, "/") {
+		fs.watcher.mu.Lock()
+		_, exists := fs.watcher.files[name]
+		fs.watcher.mu.Unlock()
+		if exists {
+			return &fuse.Attr{
+				Mode: fuse.S_IFREG | 0200,
+			}, fuse.OK
+		}
+		return nil, fuse.ENOENT
+	}
+
+	// Single-component paths: treat task_* as directories so scripts can create files beneath them.
+	if strings.HasPrefix(name, "task_") {
+		return &fuse.Attr{
+			Mode: fuse.S_IFDIR | 0200,
 		}, fuse.OK
 	}
 
@@ -96,15 +119,23 @@ func (fs *fuseFS) GetAttr(name string, context *fuse.Context) (*fuse.Attr, fuse.
 		}, fuse.OK
 	}
 
-	fuseLogger.Verbosef("getattr %s\n", name)
-
-	return nil, fuse.ENOENT
+	// Unknown single-component name: expose as a write-only directory to allow scripts to create
+	// subdirectories like task_x without needing an explicit mkdir.
+	return &fuse.Attr{
+		Mode: fuse.S_IFDIR | 0200,
+	}, fuse.OK
 }
 
 func (fs *fuseFS) OpenDir(name string, context *fuse.Context) ([]fuse.DirEntry, fuse.Status) {
 	// Deny directory listing - write-only directory
 	fuseLogger.Verbosef("opendir refused %s\n", name)
 	return nil, fuse.EACCES
+}
+
+func (fs *fuseFS) Mkdir(name string, mode uint32, context *fuse.Context) fuse.Status {
+	// Allow directory creation for task subdirectories
+	fuseLogger.Verbosef("mkdir %s\n", name)
+	return fuse.OK
 }
 
 func (fs *fuseFS) Open(name string, flags uint32, context *fuse.Context) (nodefs.File, fuse.Status) {
@@ -256,7 +287,7 @@ func (f *fuseFile) Release() {
 			// Send file data to output channel - blocks until consumed
 			if f.watcher.outputChan != nil {
 				reader := bytes.NewReader(content)
-				f.watcher.outputChan <- FileData{Name: f.watcher.mountPath + "/" + f.name, Reader: reader}
+				f.watcher.outputChan <- FileData{Name: f.name, Reader: reader}
 			}
 		}
 	}
