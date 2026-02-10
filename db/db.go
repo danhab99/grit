@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"grit/log"
 	"os"
+	"os/signal"
 	"runtime"
+	"syscall"
 
 	badger "github.com/dgraph-io/badger/v4"
 	_ "github.com/mattn/go-sqlite3"
@@ -89,6 +91,14 @@ func NewDatabase(repo_path string) (Database, error) {
 	if err != nil {
 		return Database{}, fmt.Errorf("failed to open BadgerDB: %w", err)
 	}
+
+	go func() {
+		c := make(chan os.Signal, 1)
+		go signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGABRT)
+		<-c
+		db.Close()
+		badgerDB.Close()
+	}()
 
 	return Database{db, repo_path, badgerDB}, nil
 }
