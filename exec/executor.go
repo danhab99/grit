@@ -12,8 +12,8 @@ import (
 )
 
 type ScriptExecutor struct {
-	db         *db.Database
-	mountPath  string
+	db        *db.Database
+	mountPath string
 }
 
 func NewScriptExecutor(db *db.Database, mountPath string) *ScriptExecutor {
@@ -60,7 +60,7 @@ func (e *ScriptExecutor) Execute(task db.Task, step db.Step) error {
 
 	// Execute the script
 	executeLogger.Verbosef("Executing: %s\n", step.Script)
-	cmd := e.buildCommand(step, inputFile.Name(), e.mountPath)
+	cmd := e.buildCommand(step, inputFile.Name(), e.mountPath, task.ID)
 
 	// Run script and capture output
 	if err := e.runScript(cmd, step); err != nil {
@@ -98,11 +98,19 @@ func (e *ScriptExecutor) prepareInput(task db.Task, inputFile *os.File) error {
 	return nil
 }
 
-func (e *ScriptExecutor) buildCommand(step db.Step, inputFile, outputDir string) *exec.Cmd {
+func (e *ScriptExecutor) buildCommand(step db.Step, inputFile, outputDir string, taskID int64) *exec.Cmd {
 	cmd := exec.Command("sh", "-c", step.Script)
+	outdir := fmt.Sprintf("%s/task_%d", outputDir, taskID)
+
+	// Ensure the per-task output directory exists (creates via FUSE)
+	if err := os.MkdirAll(outdir, 0755); err != nil {
+		executeLogger.Printf("Error creating output dir %s: %v\n", outdir, err)
+		panic(err)
+	}
+
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("INPUT_FILE=%s", inputFile),
-		fmt.Sprintf("OUTPUT_DIR=%s", outputDir),
+		fmt.Sprintf("OUTPUT_DIR=%s", outdir),
 	)
 	return cmd
 }
