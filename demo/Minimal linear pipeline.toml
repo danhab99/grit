@@ -8,7 +8,7 @@ echo "hello world" > $OUTPUT_DIR/process
 
 [[step]]
 name = "process"
-inputs = ["extract"]
+inputs = ["process"]
 script = '''
 tr '[:lower:]' '[:upper:]' < $INPUT_FILE > $OUTPUT_DIR/done
 '''

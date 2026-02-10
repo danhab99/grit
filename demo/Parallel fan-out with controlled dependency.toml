@@ -8,7 +8,7 @@ done
 
 [[step]]
 name = "work"
-inputs = ["generate"]
+inputs = ["work"]
 parallel = 4
 script = '''
 sleep 1
