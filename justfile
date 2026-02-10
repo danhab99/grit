@@ -8,3 +8,9 @@ latestChangelog := `cd changelog && ls *.md | sort -t '-' -k 1n | tail -n 1`
 
 version:
   git tag -F ./changelog/{{latestChangelog}} {{versionStr}}
+
+debug:
+  dlv debug . -- run -manifest "./demo/Minimal linear pipeline.toml" -db $(mktemp -d)
+
+demo name:
+  go run . run -manifest "./demo/{{name}}" -db $(mktemp -d)
