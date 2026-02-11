@@ -81,33 +81,46 @@ type fuseFS struct {
 
 func (fs *fuseFS) GetAttr(name string, context *fuse.Context) (*fuse.Attr, fuse.Status) {
 	if name == "" {
-		// Root directory - write-only
+		// Root directory - write-only (allow traversal)
 		return &fuse.Attr{
-			Mode: fuse.S_IFDIR | 0200,
+			Mode: fuse.S_IFDIR | 0700,
 		}, fuse.OK
-	}
+	} 
 
 	// If the path contains a slash (e.g., "task_1/upper"), prefer treating it as a file path.
-	// If the file exists, return file attributes. If it doesn't, return ENOENT so the kernel
-	// can proceed with creation (Create will be called).
+	// Only allow one level of nesting (task_x/<name>). If the path has more than one slash, return
+	// ENOENT so nested creations are not permitted. If the file or dir exists, return the proper
+	// attributes; otherwise return ENOENT so the kernel can proceed with Create or Mkdir.
 	if strings.Contains(name, "/") {
+		// Disallow deeper-than-1 nesting
+		if strings.Count(name, "/") > 1 {
+			return nil, fuse.ENOENT
+		}
+
 		fs.watcher.mu.Lock()
-		_, exists := fs.watcher.files[name]
+		_, fileExists := fs.watcher.files[name]
+		_, dirExists := fs.watcher.dirs[name]
 		fs.watcher.mu.Unlock()
-		if exists {
+		if fileExists {
 			return &fuse.Attr{
 				Mode: fuse.S_IFREG | 0200,
 			}, fuse.OK
 		}
+		if dirExists {
+			return &fuse.Attr{
+				Mode: fuse.S_IFDIR | 0700,
+			}, fuse.OK
+		}
+		// Unknown nested path: report ENOENT so the kernel will attempt Create/Mkdir
 		return nil, fuse.ENOENT
-	}
+	} 
 
 	// Single-component paths: treat task_* as directories so scripts can create files beneath them.
 	if strings.HasPrefix(name, "task_") {
 		return &fuse.Attr{
-			Mode: fuse.S_IFDIR | 0200,
+			Mode: fuse.S_IFDIR | 0700,
 		}, fuse.OK
-	}
+	} 
 
 	fs.watcher.mu.Lock()
 	_, exists := fs.watcher.files[name]
@@ -122,7 +135,7 @@ func (fs *fuseFS) GetAttr(name string, context *fuse.Context) (*fuse.Attr, fuse.
 	// Unknown single-component name: expose as a write-only directory to allow scripts to create
 	// subdirectories like task_x without needing an explicit mkdir.
 	return &fuse.Attr{
-		Mode: fuse.S_IFDIR | 0200,
+		Mode: fuse.S_IFDIR | 0700,
 	}, fuse.OK
 }
 
@@ -133,8 +146,16 @@ func (fs *fuseFS) OpenDir(name string, context *fuse.Context) ([]fuse.DirEntry, 
 }
 
 func (fs *fuseFS) Mkdir(name string, mode uint32, context *fuse.Context) fuse.Status {
-	// Allow directory creation for task subdirectories
+	// Allow directory creation for task subdirectories (only one level deep)
 	fuseLogger.Verbosef("mkdir %s\n", name)
+	// Reject deeper-than-one-level requests
+	if strings.Count(name, "/") > 1 {
+		fuseLogger.Verbosef("mkdir rejected (too deep): %s\n", name)
+		return fuse.ENOENT
+	}
+	fs.watcher.mu.Lock()
+	defer fs.watcher.mu.Unlock()
+	fs.watcher.dirs[name] = struct{}{}
 	return fuse.OK
 }
 

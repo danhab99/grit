@@ -18,6 +18,7 @@ type FuseWatcher struct {
 	server     *fuse.Server
 	mu         sync.Mutex
 	files      map[string]*fileData
+	dirs       map[string]struct{}
 	closed     bool
 	outputChan chan<- FileData
 	openFiles  sync.WaitGroup // Track open files
@@ -48,8 +49,9 @@ func NewFuseWatcher(mountPath string, outputChan chan<- FileData) (*FuseWatcher,
 	fw := &FuseWatcher{
 		mountPath:  mountPath,
 		files:      make(map[string]*fileData),
+		dirs:       make(map[string]struct{}),
 		outputChan: outputChan,
-	}
+	} 
 
 	fs := pathfs.NewPathNodeFs(&fuseFS{
 		FileSystem: pathfs.NewDefaultFileSystem(),
