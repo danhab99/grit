@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"grit/broadcast"
 
 	badger "github.com/dgraph-io/badger/v4"
 	_ "github.com/mattn/go-sqlite3"
@@ -50,9 +51,10 @@ CREATE INDEX IF NOT EXISTS idx_task_input_resource ON task(input_resource_id);
 `
 
 type Database struct {
-	db        *sql.DB
-	repo_path string
-	badgerDB  *badger.DB
+	db               *sql.DB
+	repo_path        string
+	badgerDB         *badger.DB
+	resourceListener *broadcast.Broadcaster[any]
 }
 
 type Step struct {

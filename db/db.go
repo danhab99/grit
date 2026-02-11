@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"grit/broadcast"
 	"grit/log"
 	"os"
 	"runtime"
@@ -90,7 +91,9 @@ func NewDatabase(repo_path string) (Database, error) {
 		return Database{}, fmt.Errorf("failed to open BadgerDB: %w", err)
 	}
 
-	return Database{db, repo_path, badgerDB}, nil
+	b := broadcast.NewBroadcaster[any]()
+
+	return Database{db, repo_path, badgerDB, b}, nil
 }
 
 func (d Database) Close() error {
@@ -101,4 +104,8 @@ func (d Database) Close() error {
 		return fmt.Errorf("failed to close BadgerDB: %w", err)
 	}
 	return nil
+}
+
+func (d Database) WaitForResourceCommit() {
+	<-d.resourceListener.Subscribe(0)
 }
