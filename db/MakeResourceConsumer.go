@@ -1,85 +1,124 @@
 package db
 
 import (
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"grit/fuse"
+	"grit/watchdog"
 	"io"
-	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/danhab99/idk/workers"
+	"github.com/dgraph-io/badger/v4"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 func (db Database) MakeResourceConsumer() chan fuse.FileData {
 	inputChan := make(chan fuse.FileData, 100) // Buffered to prevent deadlock
 
-	// Process FileData directly in the worker pool: compute hash, store object and
-	// insert resource record immediately. This avoids any channel-based batching
-	// or buffering for downstream storage/DB workers.
-	// Worker pool: read FileData, compute hash, store object if needed, and create resource
-	numWorkers := runtime.NumCPU()
 	go func() {
-		workers.Parallel0(inputChan, numWorkers, func(fd fuse.FileData) {
-			// Parse path: "task_N/filename" or just "filename"
-			var taskID *int64
-			filename := fd.Name
 
-			pathParts := strings.Split(fd.Name, "/")
-			if len(pathParts) > 1 {
-				// Has directory structure: extract task ID from "task_N"
-				taskDir := pathParts[0]
-				filename = pathParts[len(pathParts)-1]
+		var badgetTxn *badger.Txn
+		var sqliteTxn *sql.Tx
+		var stmt *sql.Stmt
 
-				if strings.HasPrefix(taskDir, "task_") {
-					if id, err := strconv.ParseInt(strings.TrimPrefix(taskDir, "task_"), 10, 64); err == nil {
-						taskID = &id
-					}
+		const MAX = 100
+		spaceLeft := MAX
+
+		dog := watchdog.NewWatchdog(100 * time.Millisecond)
+
+		for {
+			if badgetTxn == nil {
+				dbLogger.Verboseln("Creating new BadgerDB transaction")
+				badgetTxn = db.badgerDB.NewTransaction(true)
+			}
+
+			if sqliteTxn == nil {
+				var err error
+
+				dbLogger.Verboseln("Creating new Sqlite transaction")
+				sqliteTxn, err = db.db.BeginTx(context.Background(), nil)
+				if err != nil {
+					panic(err)
 				}
-			}
 
-			resourceName := strings.Split(filename, "_")[0]
-			data, err := io.ReadAll(fd.Reader)
-			if err != nil {
-				panic(err)
-			}
-
-			// Compute hash
-			hasher := sha256.New()
-			hasher.Write(data)
-			hash := hex.EncodeToString(hasher.Sum(nil))
-
-			// Store object if it doesn't already exist
-			if !db.ObjectExists(hash) {
-				if err := db.StoreObject(hash, data); err != nil {
+				stmt, err = sqliteTxn.PrepareContext(context.Background(), "INSERT INTO resource (name, object_hash, created_by_task_id) VALUES(?, ?, ?) ON CONFLICT DO NOTHING")
+				if err != nil {
 					panic(err)
 				}
 			}
 
-			// Insert resource record (with retries)
-			if _, err := db.CreateResourceWithTask(resourceName, hash, taskID); err != nil {
-				const maxRetries = 3
-				var err2 error
-				for attempt := 1; attempt <= maxRetries; attempt++ {
-					_, err2 = db.CreateResourceWithTask(resourceName, hash, taskID)
-					if err2 == nil {
-						break
-					}
-					dbLogger.Println("Error while trying to create resource", err2, attempt)
-					if attempt < maxRetries {
-						time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
-					}
+			select {
+			case in, ok := <-inputChan:
+				if !ok {
+					return
 				}
-				if err2 != nil {
-					panic(err2)
+				dog.Pet()
+				dbLogger.Verboseln("Adding resource to transaction", in.Name)
+
+				parts := strings.Split(in.Name, "/")
+				if len(parts) != 2 {
+					panic("invalid resource name format")
 				}
+
+				taskId := strings.Split(parts[0], "_")[1]
+				resourceName := strings.Split(parts[1], "_")[0]
+
+				data, err := io.ReadAll(in.Reader)
+				if err != nil {
+					panic(err)
+				}
+
+				hash := sha256.Sum256(data)
+
+				err = badgetTxn.Set(hash[:], data)
+				if err != nil {
+					panic(err)
+				}
+
+				hs := hex.EncodeToString(hash[:])
+
+				_, err = stmt.Exec(resourceName, hs, taskId)
+				if err != nil {
+					panic(err)
+				}
+				spaceLeft--
+				dbLogger.Verboseln("Added new resources", in.Name, hs, taskId, spaceLeft)
+
+			case <-dog.Bark:
+				dbLogger.Verboseln("Dog barked, flushing transactions")
+				spaceLeft = 0
 			}
 
-			dbLogger.Verbosef("Created resource %s (hash: %s)\n", resourceName, hash[:16]+"...")
-		})
+			if spaceLeft == 0 {
+				spaceLeft = MAX
+
+				dbLogger.Verboseln("Committing badger transaction")
+				err := badgetTxn.Commit()
+				if err != nil {
+					panic(err)
+				}
+
+				badgetTxn = nil
+
+				err = stmt.Close()
+				if err != nil {
+					panic(err)
+				}
+
+				dbLogger.Verboseln("Committing sqlite transaction")
+				err = sqliteTxn.Commit()
+				if err != nil {
+					panic(err)
+				}
+				sqliteTxn = nil
+
+				dbLogger.Verboseln("Announcing committment")
+				db.resourceListener.Broadcast(nil)
+			}
+		}
 	}()
 
 	return inputChan

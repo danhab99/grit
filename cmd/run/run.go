@@ -165,6 +165,7 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 				runLogger.Printf("Step %s: executed %d tasks\n", step.Name, executions)
 			}
 			fuseWatcher.WaitForWrites()
+			database.WaitForResourceCommit()
 		}
 	}
 
