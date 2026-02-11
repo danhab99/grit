@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
+	"syscall"
 	"time"
 
 	"grit/db"
@@ -105,10 +107,20 @@ func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledS
 		panic(err)
 	}
 
-	return steps, pipeline, fuseWatcher, func() {
+	stop := func() {
 		fuseWatcher.Stop()
 		fuseWatcher.WaitForWrites()
+		database.Close()
 	}
+
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGABRT, os.Interrupt, os.Kill)
+		<-c
+		stop()
+	}()
+
+	return steps, pipeline, fuseWatcher, stop
 }
 
 func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps []string) {
