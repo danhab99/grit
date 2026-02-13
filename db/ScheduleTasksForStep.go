@@ -30,7 +30,7 @@ func (d Database) ScheduleTasksForStep(stepID int64) (int64, error) {
 	// that were produced by the upstream steps listed in step.Inputs.
 	// We join resource -> creating task -> creating step and match the
 	// creating step's name against the input list.
-	result, err := d.db.Exec(`
+	result, err := d.execWithBusyRetry(`
 		INSERT INTO task (step_id, input_resource_id, processed, error)
 		SELECT ?, r.id, 0, NULL
 		FROM resource r
