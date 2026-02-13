@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// Watchdog emits a bark on Bark if it is not Pet() before the timeout.
-// After the first bark, it continues barking every timeout until Pet() is called again.
+// Watchdog emits a single bark on Bark if it is not Pet() before the timeout.
+// After barking once, it stops permanently.
 type Watchdog struct {
-	Bark <-chan struct{} // receive-only for users
+	Bark <-chan struct{} // receive-only
 
 	barkCh chan struct{}
 	petCh  chan struct{}
@@ -19,19 +19,18 @@ type Watchdog struct {
 }
 
 // NewWatchdog creates and starts a watchdog with the given timeout.
-// You must call Pet() before the timeout elapses, otherwise it will bark on Bark.
+// You must call Pet() before the timeout elapses or it will bark once.
 func NewWatchdog(timeout time.Duration) *Watchdog {
 	if timeout <= 0 {
-		// A non-positive timeout is almost always a bug; force something usable.
 		timeout = time.Millisecond
 	}
 
-	barkCh := make(chan struct{}, 1) // buffer 1 so a single bark can be observed even if not immediately read
+	barkCh := make(chan struct{}, 1)
 
 	w := &Watchdog{
 		Bark:   barkCh,
 		barkCh: barkCh,
-		petCh:  make(chan struct{}, 1), // coalesce pets
+		petCh:  make(chan struct{}, 1),
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 	}
@@ -41,16 +40,15 @@ func NewWatchdog(timeout time.Duration) *Watchdog {
 }
 
 // Pet resets the watchdog deadline.
-// Safe to call from multiple goroutines.
+// Safe for concurrent use.
 func (w *Watchdog) Pet() {
-	// Coalesce multiple pets; we only need to know "at least one happened".
 	select {
 	case w.petCh <- struct{}{}:
 	default:
 	}
 }
 
-// Stop terminates the watchdog goroutine. Idempotent.
+// Stop terminates the watchdog goroutine. Safe to call multiple times.
 func (w *Watchdog) Stop() {
 	w.once.Do(func() {
 		close(w.stopCh)
@@ -62,15 +60,7 @@ func (w *Watchdog) loop(timeout time.Duration) {
 	defer close(w.doneCh)
 
 	timer := time.NewTimer(timeout)
-	defer func() {
-		if !timer.Stop() {
-			// Drain if needed (rare, but correct).
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}()
+	defer timer.Stop()
 
 	for {
 		select {
@@ -78,7 +68,7 @@ func (w *Watchdog) loop(timeout time.Duration) {
 			return
 
 		case <-w.petCh:
-			// Drain extra pets so we don't immediately "re-pet" after reset.
+			// Drain extra pets
 			for {
 				select {
 				case <-w.petCh:
@@ -96,13 +86,12 @@ func (w *Watchdog) loop(timeout time.Duration) {
 			timer.Reset(timeout)
 
 		case <-timer.C:
-			// Non-blocking bark: if consumer isn't reading and buffer is full, drop.
+			// Bark once (non-blocking)
 			select {
 			case w.barkCh <- struct{}{}:
 			default:
 			}
-			// Keep barking every timeout until Pet() happens.
-			timer.Reset(timeout)
+			return // stop permanently after first bark
 		}
 	}
 }
