@@ -1,0 +1,35 @@
+# Demo showing columns feature
+# Steps produce resources, columns compute values for each resource
+
+[[step]]
+name = "extract"
+script = '''
+echo "hello world" > $OUTPUT_DIR/data
+echo "second item" > $OUTPUT_DIR/data
+'''
+
+# Column that counts characters in the resource data
+# Has no dependencies so it operates directly on the resource data
+[[column]]
+name = "char_count"
+script = '''
+wc -c < $INPUT_DIR/data > $OUTPUT_DIR/char_count
+'''
+
+# Column that converts to uppercase
+# Also has no dependencies, operates on resource data
+[[column]]
+name = "uppercase"
+script = '''
+tr '[:lower:]' '[:upper:]' < $INPUT_DIR/data > $OUTPUT_DIR/uppercase
+'''
+
+# Column that combines results from other columns
+# Has dependencies on char_count and uppercase
+[[column]]
+name = "summary"
+dependencies = ["char_count", "uppercase"]
+script = '''
+echo "Character count: $(cat $INPUT_DIR/char_count)" > $OUTPUT_DIR/summary
+echo "Uppercase: $(cat $INPUT_DIR/uppercase)" >> $OUTPUT_DIR/summary
+'''

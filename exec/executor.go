@@ -165,3 +165,153 @@ func (e *ScriptExecutor) runScript(cmd *exec.Cmd, step db.Step) error {
 
 	return nil
 }
+
+func (e *ScriptExecutor) runColumnScript(cmd *exec.Cmd, column db.Column) error {
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		executeLogger.Printf("Error starting column script: %v\n", err)
+		return fmt.Errorf("failed to start column script: %w", err)
+	}
+
+	scriptLogger := executeLogger.Context("col:" + column.Name)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			scriptLogger.Verbosef("[stdout] %s\n", scanner.Text())
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			scriptLogger.Verbosef("[stderr] %s\n", scanner.Text())
+		}
+	}()
+
+	// Wait for command to finish (closes pipes)
+	err = cmd.Wait()
+
+	// Then wait for goroutines to finish reading
+	wg.Wait()
+
+	if err != nil {
+		executeLogger.Printf("Error executing column script: %v\n", err)
+		return fmt.Errorf("column script execution failed: %w", err)
+	}
+
+	return nil
+}
+
+// ExecuteColumnTask executes a column task for computing a column value for a resource
+func (e *ScriptExecutor) ExecuteColumnTask(task db.ColumnTask, column db.Column) error {
+	start := time.Now()
+
+	// Create input directory for dependency column values
+	inputDir, err := os.MkdirTemp("/tmp", "col-input-*")
+	if err != nil {
+		return fmt.Errorf("failed to create input directory: %w", err)
+	}
+	defer os.RemoveAll(inputDir)
+
+	// Get the resource for this task
+	resource, err := e.db.GetResource(task.ResourceID)
+	if err != nil {
+		return fmt.Errorf("failed to get resource: %w", err)
+	}
+
+	// Write resource data to input directory as "data" file (the implicit dependency)
+	resourceData, err := e.db.GetObject(resource.ObjectHash)
+	if err != nil {
+		return fmt.Errorf("failed to get resource object: %w", err)
+	}
+
+	dataFile := fmt.Sprintf("%s/data", inputDir)
+	if err := os.WriteFile(dataFile, resourceData, 0644); err != nil {
+		return fmt.Errorf("failed to write resource data: %w", err)
+	}
+	executeLogger.Verbosef("Column input: %d bytes from resource '%s' (hash: %s) -> data\n", len(resourceData), resource.Name, resource.ObjectHash[:16]+"...")
+
+	// Write dependency column values to input directory
+	for _, depName := range column.Dependencies {
+		colValue, err := e.db.GetColumnValueByColumnName(depName, task.ResourceID)
+		if err != nil {
+			return fmt.Errorf("failed to get column value for %s: %w", depName, err)
+		}
+		if colValue == nil {
+			return fmt.Errorf("missing column value for dependency %s", depName)
+		}
+
+		depData, err := e.db.GetObject(colValue.ObjectHash)
+		if err != nil {
+			return fmt.Errorf("failed to get object for column %s: %w", depName, err)
+		}
+
+		depFile := fmt.Sprintf("%s/%s", inputDir, depName)
+		if err := os.WriteFile(depFile, depData, 0644); err != nil {
+			return fmt.Errorf("failed to write dependency data for %s: %w", depName, err)
+		}
+		executeLogger.Verbosef("Column input: %d bytes from column '%s' -> %s\n", len(depData), depName, depName)
+	}
+
+	// Create output directory
+	outputDir, err := os.MkdirTemp("/tmp", "col-output-*")
+	if err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+	defer os.RemoveAll(outputDir)
+
+	// Build and execute the command
+	cmd := e.buildColumnCommand(column, inputDir, outputDir)
+
+	if err := e.runColumnScript(cmd, column); err != nil {
+		return err
+	}
+
+	// Read output file (should be named after the column)
+	outputFile := fmt.Sprintf("%s/%s", outputDir, column.Name)
+	outputData, err := os.ReadFile(outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to read column output file %s: %w", outputFile, err)
+	}
+
+	// Store the output as a column value
+	hash, err := e.db.StoreObjectAndGetHash(outputData)
+	if err != nil {
+		return fmt.Errorf("failed to store column value: %w", err)
+	}
+
+	_, err = e.db.CreateColumnValue(column.ID, task.ResourceID, hash)
+	if err != nil {
+		return fmt.Errorf("failed to create column value record: %w", err)
+	}
+
+	elapsedTime := time.Since(start)
+
+	executeLogger.Printf("Executed column task ID=%d for column '%s' resource=%d successfully in %s\n", task.ID, column.Name, task.ResourceID, elapsedTime.String())
+	return nil
+}
+
+func (e *ScriptExecutor) buildColumnCommand(column db.Column, inputDir, outputDir string) *exec.Cmd {
+	cmd := exec.Command("sh", "-c", column.Script)
+
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("INPUT_DIR=%s", inputDir),
+		fmt.Sprintf("OUTPUT_DIR=%s", outputDir),
+	)
+	return cmd
+}

@@ -104,3 +104,54 @@ func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
 
 	return executionCount.Load()
 }
+
+// ExecuteColumn executes all pending tasks for a column
+func (p *Pipeline) ExecuteColumn(column db.Column, maxParallel int) int64 {
+	database := p.database
+
+	// Schedule new column tasks
+	tasksCreated, err := database.ScheduleColumnTasksForColumn(column.ID)
+	if err != nil {
+		pipelineLogger.Printf("Error scheduling tasks for column %s: %v\n", column.Name, err)
+		return 0
+	}
+
+	if tasksCreated > 0 {
+		pipelineLogger.Printf("Column %s: scheduled %d new tasks\n", column.Name, tasksCreated)
+	}
+
+	err = database.ForceSaveWAL()
+	if err != nil {
+		panic(err)
+	}
+	taskChan := database.GetUnprocessedColumnTasks(column.ID)
+
+	var executionCount atomic.Int64
+	pr := column.Parallel
+	if pr == nil {
+		x := runtime.NumCPU()
+		pr = &x
+	}
+
+	workers.Parallel0(taskChan, *pr, func(task db.ColumnTask) {
+		pipelineLogger.Verbosef("Executing column task %d for column %s (resource=%d)\n", task.ID, column.Name, task.ResourceID)
+
+		execErr := p.executor.ExecuteColumnTask(task, column)
+
+		var errorMsg *string
+		if execErr != nil {
+			msg := execErr.Error()
+			errorMsg = &msg
+			pipelineLogger.Printf("Column task %d failed: %v\n", task.ID, execErr)
+		}
+
+		err = database.UpdateColumnTaskStatus(task.ID, true, errorMsg)
+		if err != nil {
+			pipelineLogger.Printf("Error updating column task %d: %v\n", task.ID, err)
+		}
+
+		executionCount.Add(1)
+	})
+
+	return executionCount.Load()
+}

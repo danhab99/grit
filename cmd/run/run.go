@@ -25,10 +25,11 @@ var runLogger = log.NewLogger("RUN")
 
 // Command flags
 var (
-	manifestPath *string
-	dbPath       *string
-	parallel     *int
-	enabledSteps stringSlice
+	manifestPath   *string
+	dbPath         *string
+	parallel       *int
+	enabledSteps   stringSlice
+	enabledColumns stringSlice
 )
 
 type stringSlice []string
@@ -48,6 +49,7 @@ func RegisterFlags(fs *flag.FlagSet) {
 	dbPath = fs.String("db", "./db", "database path")
 	parallel = fs.Int("parallel", runtime.NumCPU(), "number of processes to run in parallel")
 	fs.Var(&enabledSteps, "step", "steps to run (can be specified multiple times)")
+	fs.Var(&enabledColumns, "column", "columns to run (can be specified multiple times)")
 }
 
 // Execute runs the pipeline
@@ -71,7 +73,7 @@ func Execute() {
 		fmt.Fprintf(os.Stderr, "Error parsing manifest: %v\n", err)
 		os.Exit(1)
 	}
-	runLogger.Printf("Loaded %d steps from manifest\n", len(m.Steps))
+	runLogger.Printf("Loaded %d steps and %d columns from manifest\n", len(m.Steps), len(m.Columns))
 
 	// Check disk space before opening database
 	utils.CheckDiskSpace(*dbPath)
@@ -84,13 +86,14 @@ func Execute() {
 	}
 	defer database.Close()
 
-	run(m, database, *parallel, enabledSteps)
+	run(m, database, *parallel, enabledSteps, enabledColumns)
 }
 
-func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledSteps []string) ([]db.Step, *pipeline.Pipeline, *fuse.FuseWatcher, func()) {
+func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledSteps []string, enabledColumns []string) ([]db.Step, []db.Column, *pipeline.Pipeline, *fuse.FuseWatcher, func()) {
 	steps := m.RegisterSteps(&database, enabledSteps)
+	columns := m.RegisterColumns(&database, enabledColumns)
 
-	runLogger.Printf("Registered %d steps\n", len(m.Steps))
+	runLogger.Printf("Registered %d steps and %d columns\n", len(steps), len(columns))
 
 	outputChan := database.MakeResourceConsumer()
 
@@ -120,13 +123,13 @@ func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledS
 		stop()
 	}()
 
-	return steps, pipeline, fuseWatcher, stop
+	return steps, columns, pipeline, fuseWatcher, stop
 }
 
-func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps []string) {
+func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps []string, enabledColumns []string) {
 	startTime := time.Now()
 
-	steps, pipeline, fuseWatcher, stop := constructRunnerPipeline(m, database, enabledSteps)
+	steps, columns, pipeline, fuseWatcher, stop := constructRunnerPipeline(m, database, enabledSteps, enabledColumns)
 	defer stop()
 
 	// Check if we need to seed
@@ -136,13 +139,14 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 	}
 
 	// Execute all steps
-	var totalExecutions int64
+	var totalStepExecutions int64
+	var totalColumnExecutions int64
 
 	if resourceCount == 0 {
 		runLogger.Printf("No resources found, running seed steps\n")
 
 		for step := range database.GetStepsWithZeroInputs() {
-			totalExecutions += pipeline.ExecuteStep(step, parallel)
+			totalStepExecutions += pipeline.ExecuteStep(step, parallel)
 		}
 	}
 
@@ -159,7 +163,7 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 	for range 2 {
 		for _, step := range steps {
 			executions := pipeline.ExecuteStep(step, parallel)
-			totalExecutions += executions
+			totalStepExecutions += executions
 
 			if executions > 0 {
 				runLogger.Printf("Step %s: executed %d tasks\n", step.Name, executions)
@@ -167,8 +171,18 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 			fuseWatcher.WaitForWrites()
 			database.WaitForResourceCommit()
 		}
+
+		// Execute columns after steps have created resources
+		for _, column := range columns {
+			executions := pipeline.ExecuteColumn(column, parallel)
+			totalColumnExecutions += executions
+
+			if executions > 0 {
+				runLogger.Printf("Column %s: executed %d tasks\n", column.Name, executions)
+			}
+		}
 	}
 
 	duration := time.Since(startTime)
-	runLogger.Printf("Pipeline complete: %d tasks executed in %s\n", totalExecutions, duration.Round(time.Millisecond))
+	runLogger.Printf("Pipeline complete: %d step tasks, %d column tasks executed in %s\n", totalStepExecutions, totalColumnExecutions, duration.Round(time.Millisecond))
 }
