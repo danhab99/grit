@@ -8,8 +8,12 @@ import (
 	"grit/db"
 )
 
-func exportResourceTableCSV(database db.Database, outputPath string) {
-	exportLogger.Printf("Exporting resource table to CSV: %s\n", outputPath)
+func exportResourceTableCSV(database db.Database, outputPath string, resourceName string) {
+	if resourceName != "" {
+		exportLogger.Printf("Exporting resources with name '%s' to CSV: %s\n", resourceName, outputPath)
+	} else {
+		exportLogger.Printf("Exporting all resources to CSV: %s\n", outputPath)
+	}
 
 	// Get all column definitions
 	columns, err := database.ListAllColumns()
@@ -43,9 +47,17 @@ func exportResourceTableCSV(database db.Database, outputPath string) {
 		os.Exit(1)
 	}
 
+	// Get resources - either all or filtered by name
+	var resourceChan chan db.Resource
+	if resourceName != "" {
+		resourceChan = database.GetResourcesByName(resourceName)
+	} else {
+		resourceChan = database.GetAllResources()
+	}
+
 	// Write resource rows
 	resourceCount := 0
-	for resource := range database.GetAllResources() {
+	for resource := range resourceChan {
 		row := []string{
 			strconv.FormatInt(resource.ID, 10),
 			resource.Name,

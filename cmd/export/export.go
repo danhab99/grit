@@ -25,7 +25,7 @@ var (
 // RegisterFlags sets up the flags for the export command
 func RegisterFlags(fs *flag.FlagSet) {
 	dbPath = fs.String("db", "./db", "database path")
-	name = fs.String("name", "", "list resource hashes by name")
+	name = fs.String("name", "", "filter by resource name (use with -csv to export specific resource)")
 	hash = fs.String("hash", "", "export file content by hash")
 	tarOut = fs.String("tar", "", "export all resources to tarball")
 	compressed = fs.Bool("compressed", true, "Compress the tarball")
@@ -47,13 +47,15 @@ func Execute() {
 	}
 	defer database.Close()
 
-	if *name != "" {
+	if *csvOut != "" {
+		// CSV export (optionally filtered by name)
+		exportResourceTableCSV(database, *csvOut, *name)
+	} else if *name != "" {
+		// List resources by name (legacy behavior)
 		exportResourcesByName(database, *name)
 	} else if *hash != "" {
 		exportResourceByHash(database, *hash)
 	} else if *tarOut != "" {
 		exportTarball(database, *tarOut, *compressed, []string{})
-	} else if *csvOut != "" {
-		exportResourceTableCSV(database, *csvOut)
 	}
 }
