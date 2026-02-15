@@ -148,6 +148,21 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 		for step := range database.GetStepsWithZeroInputs() {
 			totalStepExecutions += pipeline.ExecuteStep(step, parallel)
 		}
+
+		// Wait for seed step outputs to be written to FUSE
+		fuseWatcher.WaitForWrites()
+
+		// Wait for resource consumer to commit (with timeout polling)
+		for i := 0; i < 50; i++ {
+			resourceCount, err = database.CountResources()
+			if err != nil {
+				panic(err)
+			}
+			if resourceCount > 0 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 
 	resourceCount, err = database.CountResources()
@@ -167,9 +182,9 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 
 			if executions > 0 {
 				runLogger.Printf("Step %s: executed %d tasks\n", step.Name, executions)
+				fuseWatcher.WaitForWrites()
+				database.WaitForResourceCommit()
 			}
-			fuseWatcher.WaitForWrites()
-			database.WaitForResourceCommit()
 		}
 
 		// Execute columns after steps have created resources

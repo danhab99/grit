@@ -49,8 +49,17 @@ func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
 
 		if !startTask.Processed {
 			err = p.executor.Execute(startTask, step)
+			var errorMsg *string
 			if err != nil {
-				panic(err)
+				msg := err.Error()
+				errorMsg = &msg
+				pipelineLogger.Printf("Seed task %d failed: %v\n", startTask.ID, err)
+			}
+
+			// Mark the seed task as processed
+			err = database.UpdateTaskStatus(startTask.ID, true, errorMsg)
+			if err != nil {
+				pipelineLogger.Printf("Error updating seed task %d: %v\n", startTask.ID, err)
 			}
 			return 1
 		}
