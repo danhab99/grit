@@ -27,7 +27,7 @@
             pname = "grit";
             version = import ./changelog;
             src = self;
-            vendorHash = "sha256-t8nxIZPT7Ki4lvGhXBp3o7cl4klhKkxc26KgjUX9djw=";
+            vendorHash = "sha256-6zbliSeUKwMS4NEyJCxT8z1IzDFxH47KQ78V6jGpsG4=";
             subPackages = [ "." ];
 
             GO_PATH = "${self.outPath}/.go";
