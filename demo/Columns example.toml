@@ -4,8 +4,8 @@
 [[step]]
 name = "extract"
 script = '''
-echo "hello world" > $OUTPUT_DIR/data
-echo "second item" > $OUTPUT_DIR/data
+echo "hello world" > $OUTPUT_DIR/data_1
+echo "second item" > $OUTPUT_DIR/data_2
 '''
 
 # Column that counts characters in the resource data

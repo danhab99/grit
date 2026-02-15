@@ -222,7 +222,7 @@ func (e *ScriptExecutor) ExecuteColumnTask(task db.ColumnTask, column db.Column)
 	start := time.Now()
 
 	// Create input directory for dependency column values
-	inputDir, err := os.MkdirTemp("/tmp", "col-input-*")
+	inputDir, err := os.MkdirTemp("", "col-input-*")
 	if err != nil {
 		return fmt.Errorf("failed to create input directory: %w", err)
 	}
@@ -269,7 +269,7 @@ func (e *ScriptExecutor) ExecuteColumnTask(task db.ColumnTask, column db.Column)
 	}
 
 	// Create output directory
-	outputDir, err := os.MkdirTemp("/tmp", "col-output-*")
+	outputDir, err := os.MkdirTemp("", "col-output-*")
 	if err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
