@@ -46,11 +46,12 @@ CREATE TABLE IF NOT EXISTS resource (
 CREATE TABLE IF NOT EXISTS column_def (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   name         TEXT NOT NULL,
+  resource_name TEXT NOT NULL,
   script       TEXT NOT NULL,
   parallel     INTEGER,
   dependencies TEXT,
   version      INTEGER DEFAULT 1,
-  UNIQUE(name, version)
+  UNIQUE(name, resource_name, version)
 );
 
 CREATE TABLE IF NOT EXISTS column_task (
@@ -123,6 +124,7 @@ type Resource struct {
 type Column struct {
 	ID           int64
 	Name         string
+	ResourceName string
 	Script       string
 	Parallel     *int
 	Dependencies []string

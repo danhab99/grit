@@ -22,12 +22,12 @@ func (d Database) CreateColumn(column Column) (int64, error) {
 		depsStr = "[]"
 	}
 
-	// Check if a column with the same name, script, and dependencies already exists
+	// Check if a column with the same name, resource_name, script, and dependencies already exists
 	var existingID int64
 	var existingDeps sql.NullString
-	err := d.db.QueryRow("SELECT id, dependencies FROM column_def WHERE name = ? AND script = ? ORDER BY version DESC LIMIT 1", column.Name, column.Script).Scan(&existingID, &existingDeps)
+	err := d.db.QueryRow("SELECT id, dependencies FROM column_def WHERE name = ? AND resource_name = ? AND script = ? ORDER BY version DESC LIMIT 1", column.Name, column.ResourceName, column.Script).Scan(&existingID, &existingDeps)
 	if err == nil {
-		// Column with same name and script exists, check if dependencies match
+		// Column with same name, resource_name and script exists, check if dependencies match
 		existingDepsStr := "[]"
 		if existingDeps.Valid && existingDeps.String != "" {
 			existingDepsStr = existingDeps.String
@@ -48,9 +48,9 @@ func (d Database) CreateColumn(column Column) (int64, error) {
 		return 0, err
 	}
 
-	// Get the max version for this column name
+	// Get the max version for this column name and resource_name
 	var maxVersion sql.NullInt64
-	err = d.db.QueryRow("SELECT MAX(version) FROM column_def WHERE name = ?", column.Name).Scan(&maxVersion)
+	err = d.db.QueryRow("SELECT MAX(version) FROM column_def WHERE name = ? AND resource_name = ?", column.Name, column.ResourceName).Scan(&maxVersion)
 	if err != nil && err != sql.ErrNoRows {
 		return 0, err
 	}
@@ -61,9 +61,9 @@ func (d Database) CreateColumn(column Column) (int64, error) {
 	}
 
 	res, err := d.db.Exec(`
-INSERT INTO column_def (name, script, parallel, dependencies, version)
-VALUES (?, ?, ?, ?, ?)
-`, column.Name, column.Script, column.Parallel, depsStr, version)
+INSERT INTO column_def (name, resource_name, script, parallel, dependencies, version)
+VALUES (?, ?, ?, ?, ?, ?)
+`, column.Name, column.ResourceName, column.Script, column.Parallel, depsStr, version)
 	if err != nil {
 		return 0, err
 	}

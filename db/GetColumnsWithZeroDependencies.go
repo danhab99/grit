@@ -16,7 +16,7 @@ func (d Database) GetColumnsWithZeroDependencies() chan Column {
 		defer close(columnChan)
 
 		rows, err := d.db.Query(`
-			SELECT id, name, script, parallel, dependencies, version 
+			SELECT id, name, resource_name, script, parallel, dependencies, version 
 			FROM column_def 
 			WHERE dependencies IS NULL OR dependencies = '[]'
 			ORDER BY version DESC
@@ -30,7 +30,7 @@ func (d Database) GetColumnsWithZeroDependencies() chan Column {
 			var column Column
 			var parallel sql.NullInt64
 			var depsJSON sql.NullString
-			if err := rows.Scan(&column.ID, &column.Name, &column.Script, &parallel, &depsJSON, &column.Version); err != nil {
+			if err := rows.Scan(&column.ID, &column.Name, &column.ResourceName, &column.Script, &parallel, &depsJSON, &column.Version); err != nil {
 				panic(err)
 			}
 			if parallel.Valid {

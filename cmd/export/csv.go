@@ -16,7 +16,7 @@ func exportResourceTableCSV(database db.Database, outputPath string, resourceNam
 	}
 
 	// Get all column definitions
-	columns, err := database.ListAllColumns()
+	allColumns, err := database.ListAllColumns()
 	if err != nil {
 		exportLogger.Printf("Failed to list columns: %v\n", err)
 		os.Exit(1)
@@ -37,6 +37,38 @@ func exportResourceTableCSV(database db.Database, outputPath string, resourceNam
 	}
 	defer writer.Flush()
 
+	// Get resources - either all or filtered by name
+	var resourceChan chan db.Resource
+	if resourceName != "" {
+		resourceChan = database.GetResourcesByName(resourceName)
+	} else {
+		resourceChan = database.GetAllResources()
+	}
+
+	// Collect resources first to determine which columns apply
+	var resources []db.Resource
+	for resource := range resourceChan {
+		resources = append(resources, resource)
+	}
+
+	if len(resources) == 0 {
+		exportLogger.Printf("No resources found\n")
+		return
+	}
+
+	// Filter columns to only those matching the resource name(s) we're exporting
+	resourceNames := make(map[string]bool)
+	for _, r := range resources {
+		resourceNames[r.Name] = true
+	}
+
+	var columns []db.Column
+	for _, col := range allColumns {
+		if resourceNames[col.ResourceName] {
+			columns = append(columns, col)
+		}
+	}
+
 	// Write header row
 	header := []string{"id", "name", "object_hash", "created_at"}
 	for _, col := range columns {
@@ -47,17 +79,9 @@ func exportResourceTableCSV(database db.Database, outputPath string, resourceNam
 		os.Exit(1)
 	}
 
-	// Get resources - either all or filtered by name
-	var resourceChan chan db.Resource
-	if resourceName != "" {
-		resourceChan = database.GetResourcesByName(resourceName)
-	} else {
-		resourceChan = database.GetAllResources()
-	}
-
 	// Write resource rows
 	resourceCount := 0
-	for resource := range resourceChan {
+	for _, resource := range resources {
 		row := []string{
 			strconv.FormatInt(resource.ID, 10),
 			resource.Name,
@@ -65,8 +89,12 @@ func exportResourceTableCSV(database db.Database, outputPath string, resourceNam
 			resource.CreatedAt,
 		}
 
-		// Get column values for this resource
+		// Get column values for this resource (only columns that match this resource's name)
 		for _, col := range columns {
+			if col.ResourceName != resource.Name {
+				row = append(row, "")
+				continue
+			}
 			colValue, err := database.GetColumnValue(col.ID, resource.ID)
 			if err != nil {
 				exportLogger.Printf("Failed to get column value: %v\n", err)

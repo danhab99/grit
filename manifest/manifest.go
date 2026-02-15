@@ -19,6 +19,7 @@ type ManifestStep struct {
 
 type ManifestColumn struct {
 	Name         string   `toml:"name"`
+	Resource     string   `toml:"resource"`
 	Script       string   `toml:"script"`
 	Parallel     *int     `toml:"parallel"`
 	Dependencies []string `toml:"dependencies"`
@@ -60,6 +61,7 @@ func (manifest Manifest) RegisterColumns(database *db.Database, enabledColumns [
 	for _, manifestColumn := range manifest.Columns {
 		column := db.Column{
 			Name:         manifestColumn.Name,
+			ResourceName: manifestColumn.Resource,
 			Script:       manifestColumn.Script,
 			Parallel:     manifestColumn.Parallel,
 			Dependencies: manifestColumn.Dependencies,
