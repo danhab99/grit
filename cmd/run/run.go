@@ -129,6 +129,18 @@ func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledS
 func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps []string, enabledColumns []string) {
 	startTime := time.Now()
 
+	// Ingest CSV files before pipeline execution
+	if len(m.CsvFiles) > 0 {
+		csvCount, err := m.IngestCsvFiles(&database)
+		if err != nil {
+			runLogger.Printf("Error ingesting CSV files: %v\n", err)
+			panic(err)
+		}
+		if csvCount > 0 {
+			runLogger.Printf("Ingested %d rows from %d CSV file(s)\n", csvCount, len(m.CsvFiles))
+		}
+	}
+
 	steps, columns, pipeline, fuseWatcher, stop := constructRunnerPipeline(m, database, enabledSteps, enabledColumns)
 	defer stop()
 

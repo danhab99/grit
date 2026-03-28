@@ -11,6 +11,7 @@ const (
 	prefixColTask  = "ct:"
 	prefixColVal   = "cv:"
 	prefixObject   = "o:"
+	prefixMeta     = "m:"
 )
 
 // Index key prefixes
@@ -154,4 +155,10 @@ func idxColTaskUnprocPrefix(columnID string) []byte {
 
 func idxColValByResPrefix(resourceID string) []byte {
 	return []byte(idxColValByRes + resourceID + "\x00")
+}
+
+// --- Meta key builders ---
+
+func metaCsvHashKey(path string) []byte {
+	return []byte(prefixMeta + "csvhash:" + path)
 }

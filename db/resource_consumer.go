@@ -12,17 +12,17 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 )
 
+type pendingResource struct {
+	resourceName string
+	hash         string
+	data         []byte
+	taskID       string
+}
+
 func (thisDB *Database) MakeResourceConsumer() chan fuse.FileData {
 	inputChan := make(chan fuse.FileData, 100)
 
 	dog := watchdog.NewWatchdog(100 * time.Millisecond)
-
-	type pendingResource struct {
-		resourceName string
-		hash         string
-		data         []byte
-		taskID       string
-	}
 
 	batchChan := make(chan []pendingResource)
 
@@ -82,7 +82,7 @@ func (thisDB *Database) MakeResourceConsumer() chan fuse.FileData {
 		for batch := range batchChan {
 			dbLogger.Verboseln("Executing batch write")
 
-			// First: store all objects
+			// First: store all objects via WriteBatch (no conflict possible)
 			wb := thisDB.badgerDB.NewWriteBatch()
 			for _, item := range batch {
 				hashBytes, err := hex.DecodeString(item.hash)
@@ -99,56 +99,11 @@ func (thisDB *Database) MakeResourceConsumer() chan fuse.FileData {
 				panic(err)
 			}
 
-			// Second: create resource metadata + indexes in a transaction
-			err = thisDB.badgerDB.Update(func(txn *badger.Txn) error {
-				for _, item := range batch {
-					// Check unique constraint
-					hashIdxKey := idxResourceHashKey(item.resourceName, item.hash)
-					existing, err := getVal(txn, hashIdxKey)
-					if err != nil {
-						return err
-					}
-					if existing != nil {
-						continue // resource already exists
-					}
-
-					id := newULID()
-					res := Resource{
-						ID:              id,
-						Name:            item.resourceName,
-						ObjectHash:      item.hash,
-						CreatedAt:       nowTimestamp(),
-						CreatedByTaskID: &item.taskID,
-					}
-
-					if err := putEntity(txn, resourceKey(id), &res); err != nil {
-						return err
-					}
-					if err := txn.Set(idxResourceByNameKey(item.resourceName, id), nil); err != nil {
-						return err
-					}
-					if err := txn.Set(hashIdxKey, []byte(id)); err != nil {
-						return err
-					}
-					if err := txn.Set(idxResourceProducerKey(id), []byte(item.taskID)); err != nil {
-						return err
-					}
-
-					// Look up producer step name for the index
-					task, err := getEntity[Task](txn, taskKey(item.taskID))
-					if err == nil && task != nil {
-						step, err := getEntity[Step](txn, stepKey(task.StepID))
-						if err == nil && step != nil {
-							if err := txn.Set(idxResourceProdStepKey(step.Name, id), nil); err != nil {
-								return err
-							}
-						}
-					}
-				}
-				return nil
-			})
-			if err != nil {
-				panic(err)
+			// Second: create resource metadata + indexes.
+			// Process each item individually to avoid transaction conflicts
+			// when concurrent goroutines read overlapping keys (task/step lookups).
+			for _, item := range batch {
+				thisDB.insertResourceWithRetry(item)
 			}
 
 			// Notify listeners
@@ -157,4 +112,76 @@ func (thisDB *Database) MakeResourceConsumer() chan fuse.FileData {
 	}()
 
 	return inputChan
+}
+
+const maxConflictRetries = 10
+
+// insertResourceWithRetry inserts a single resource with retry on transaction conflict.
+func (thisDB *Database) insertResourceWithRetry(item pendingResource) {
+	for attempt := 0; attempt < maxConflictRetries; attempt++ {
+		err := thisDB.badgerDB.Update(func(txn *badger.Txn) error {
+			hashIdxKey := idxResourceHashKey(item.resourceName, item.hash)
+			existing, err := getVal(txn, hashIdxKey)
+			if err != nil {
+				return err
+			}
+			if existing != nil {
+				return nil // already exists
+			}
+
+			id := newULID()
+			res := Resource{
+				ID:              id,
+				Name:            item.resourceName,
+				ObjectHash:      item.hash,
+				CreatedAt:       nowTimestamp(),
+				CreatedByTaskID: &item.taskID,
+			}
+
+			if err := putEntity(txn, resourceKey(id), &res); err != nil {
+				return err
+			}
+			if err := txn.Set(idxResourceByNameKey(item.resourceName, id), nil); err != nil {
+				return err
+			}
+			if err := txn.Set(hashIdxKey, []byte(id)); err != nil {
+				return err
+			}
+			if err := txn.Set(idxResourceProducerKey(id), []byte(item.taskID)); err != nil {
+				return err
+			}
+
+			// Look up producer step name for the denormalized index.
+			// Use a separate read-only txn to avoid conflicts on shared task/step keys.
+			var stepName string
+			thisDB.badgerDB.View(func(rtxn *badger.Txn) error {
+				task, err := getEntity[Task](rtxn, taskKey(item.taskID))
+				if err == nil && task != nil {
+					step, err := getEntity[Step](rtxn, stepKey(task.StepID))
+					if err == nil && step != nil {
+						stepName = step.Name
+					}
+				}
+				return nil
+			})
+
+			if stepName != "" {
+				if err := txn.Set(idxResourceProdStepKey(stepName, id), nil); err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
+
+		if err == nil {
+			return
+		}
+		if err == badger.ErrConflict {
+			dbLogger.Verbosef("Transaction conflict on resource insert (attempt %d), retrying...\n", attempt+1)
+			continue
+		}
+		panic(err)
+	}
+	panic("failed to insert resource after max retries")
 }

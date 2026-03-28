@@ -457,48 +457,64 @@ func (d Database) ScheduleTasksForStep(stepID string) (int64, error) {
 		return 0, nil
 	}
 
-	// Phase 2: Create tasks (write)
-	err = d.badgerDB.Update(func(txn *badger.Txn) error {
-		for _, resourceID := range toSchedule {
-			// Re-check unique constraint inside write txn
-			uniqueKey := idxTaskUniqueKey(stepID, resourceID)
-			if keyExists(txn, uniqueKey) {
-				continue
-			}
+	// Phase 2: Create tasks in batches to avoid exceeding BadgerDB's txn size limit
+	const scheduleBatchSize = 5000
+	var totalScheduled int64
 
-			id := newULID()
-			resID := resourceID
-			task := Task{
-				ID:              id,
-				StepID:          stepID,
-				InputResourceID: &resID,
-			}
-
-			if err := putEntity(txn, taskKey(id), &task); err != nil {
-				return err
-			}
-			if err := txn.Set(idxTaskByStepUnprocKey(stepID, id), nil); err != nil {
-				return err
-			}
-			if err := txn.Set(idxTaskByStepAllKey(stepID, id), nil); err != nil {
-				return err
-			}
-			if err := txn.Set(uniqueKey, []byte(id)); err != nil {
-				return err
-			}
-			if err := txn.Set(idxTaskByInputKey(resourceID, id), nil); err != nil {
-				return err
-			}
+	for batchStart := 0; batchStart < len(toSchedule); batchStart += scheduleBatchSize {
+		batchEnd := batchStart + scheduleBatchSize
+		if batchEnd > len(toSchedule) {
+			batchEnd = len(toSchedule)
 		}
-		return nil
-	})
-	if err != nil {
-		return 0, fmt.Errorf("failed to schedule tasks: %w", err)
+		batch := toSchedule[batchStart:batchEnd]
+
+		err = d.badgerDB.Update(func(txn *badger.Txn) error {
+			for _, resourceID := range batch {
+				// Re-check unique constraint inside write txn
+				uniqueKey := idxTaskUniqueKey(stepID, resourceID)
+				if keyExists(txn, uniqueKey) {
+					continue
+				}
+
+				id := newULID()
+				resID := resourceID
+				task := Task{
+					ID:              id,
+					StepID:          stepID,
+					InputResourceID: &resID,
+				}
+
+				if err := putEntity(txn, taskKey(id), &task); err != nil {
+					return err
+				}
+				if err := txn.Set(idxTaskByStepUnprocKey(stepID, id), nil); err != nil {
+					return err
+				}
+				if err := txn.Set(idxTaskByStepAllKey(stepID, id), nil); err != nil {
+					return err
+				}
+				if err := txn.Set(uniqueKey, []byte(id)); err != nil {
+					return err
+				}
+				if err := txn.Set(idxTaskByInputKey(resourceID, id), nil); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return totalScheduled, fmt.Errorf("failed to schedule tasks (batch at offset %d): %w", batchStart, err)
+		}
+
+		totalScheduled += int64(len(batch))
+
+		if batchEnd < len(toSchedule) {
+			dbLogger.Verbosef("Scheduled %d/%d tasks so far for step %s (%s)\n", totalScheduled, len(toSchedule), stepID, step.Name)
+		}
 	}
 
-	count := int64(len(toSchedule))
-	if count > 0 {
-		dbLogger.Verbosef("Scheduled %d new tasks for step %s (%s)\n", count, stepID, step.Name)
+	if totalScheduled > 0 {
+		dbLogger.Verbosef("Scheduled %d new tasks for step %s (%s)\n", totalScheduled, stepID, step.Name)
 	}
-	return count, nil
+	return totalScheduled, nil
 }
