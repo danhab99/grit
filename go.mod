@@ -7,8 +7,9 @@ require (
 	github.com/dgraph-io/badger/v4 v4.9.0
 	github.com/fatih/color v1.18.0
 	github.com/hanwen/go-fuse/v2 v2.9.0
-	github.com/mattn/go-sqlite3 v1.14.33
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pelletier/go-toml v1.9.5
+	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
 require (
@@ -21,6 +22,7 @@ require (
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel v1.37.0 // indirect
 	go.opentelemetry.io/otel/metric v1.37.0 // indirect
