@@ -69,7 +69,7 @@ func (e *ScriptExecutor) Execute(task db.Task, step db.Step) error {
 
 	elapsedTime := time.Since(start)
 
-	executeLogger.Printf("Executed task ID=%d for step '%s' successfully in %s\n", task.ID, step.Name, elapsedTime.String())
+	executeLogger.Printf("Executed task ID=%s for step '%s' successfully in %s\n", task.ID, step.Name, elapsedTime.String())
 	return nil
 }
 
@@ -98,9 +98,9 @@ func (e *ScriptExecutor) prepareInput(task db.Task, inputFile *os.File) error {
 	return nil
 }
 
-func (e *ScriptExecutor) buildCommand(step db.Step, inputFile, outputDir string, taskID int64) *exec.Cmd {
+func (e *ScriptExecutor) buildCommand(step db.Step, inputFile, outputDir string, taskID string) *exec.Cmd {
 	cmd := exec.Command("sh", "-c", step.Script)
-	outdir := fmt.Sprintf("%s/task_%d", outputDir, taskID)
+	outdir := fmt.Sprintf("%s/task_%s", outputDir, taskID)
 
 	// Ensure the per-task output directory exists (creates via FUSE)
 	if err := os.MkdirAll(outdir, 0755); err != nil {
@@ -302,7 +302,7 @@ func (e *ScriptExecutor) ExecuteColumnTask(task db.ColumnTask, column db.Column)
 
 	elapsedTime := time.Since(start)
 
-	executeLogger.Printf("Executed column task ID=%d for column '%s' resource=%d successfully in %s\n", task.ID, column.Name, task.ResourceID, elapsedTime.String())
+	executeLogger.Printf("Executed column task ID=%s for column '%s' resource=%s successfully in %s\n", task.ID, column.Name, task.ResourceID, elapsedTime.String())
 	return nil
 }
 

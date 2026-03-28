@@ -53,13 +53,13 @@ func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
 			if err != nil {
 				msg := err.Error()
 				errorMsg = &msg
-				pipelineLogger.Printf("Seed task %d failed: %v\n", startTask.ID, err)
+				pipelineLogger.Printf("Seed task %s failed: %v\n", startTask.ID, err)
 			}
 
 			// Mark the seed task as processed
 			err = database.UpdateTaskStatus(startTask.ID, true, errorMsg)
 			if err != nil {
-				pipelineLogger.Printf("Error updating seed task %d: %v\n", startTask.ID, err)
+				pipelineLogger.Printf("Error updating seed task %s: %v\n", startTask.ID, err)
 			}
 			return 1
 		}
@@ -92,7 +92,7 @@ func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
 	}
 
 	workers.Parallel0(taskChan, *pr, func(task db.Task) {
-		pipelineLogger.Verbosef("Executing task %d for step %s\n", task.ID, step.Name)
+		pipelineLogger.Verbosef("Executing task %s for step %s\n", task.ID, step.Name)
 
 		execErr := p.executor.Execute(task, step)
 
@@ -100,12 +100,12 @@ func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
 		if execErr != nil {
 			msg := execErr.Error()
 			errorMsg = &msg
-			pipelineLogger.Printf("Task %d failed: %v\n", task.ID, execErr)
+			pipelineLogger.Printf("Task %s failed: %v\n", task.ID, execErr)
 		}
 
 		err = database.UpdateTaskStatus(task.ID, true, errorMsg)
 		if err != nil {
-			pipelineLogger.Printf("Error updating task %d: %v\n", task.ID, err)
+			pipelineLogger.Printf("Error updating task %s: %v\n", task.ID, err)
 		}
 
 		executionCount.Add(1)
@@ -143,7 +143,7 @@ func (p *Pipeline) ExecuteColumn(column db.Column, maxParallel int) int64 {
 	}
 
 	workers.Parallel0(taskChan, *pr, func(task db.ColumnTask) {
-		pipelineLogger.Verbosef("Executing column task %d for column %s (resource=%d)\n", task.ID, column.Name, task.ResourceID)
+		pipelineLogger.Verbosef("Executing column task %s for column %s (resource=%s)\n", task.ID, column.Name, task.ResourceID)
 
 		execErr := p.executor.ExecuteColumnTask(task, column)
 
@@ -151,12 +151,12 @@ func (p *Pipeline) ExecuteColumn(column db.Column, maxParallel int) int64 {
 		if execErr != nil {
 			msg := execErr.Error()
 			errorMsg = &msg
-			pipelineLogger.Printf("Column task %d failed: %v\n", task.ID, execErr)
+			pipelineLogger.Printf("Column task %s failed: %v\n", task.ID, execErr)
 		}
 
 		err = database.UpdateColumnTaskStatus(task.ID, true, errorMsg)
 		if err != nil {
-			pipelineLogger.Printf("Error updating column task %d: %v\n", task.ID, err)
+			pipelineLogger.Printf("Error updating column task %s: %v\n", task.ID, err)
 		}
 
 		executionCount.Add(1)

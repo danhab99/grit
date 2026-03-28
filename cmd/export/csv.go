@@ -3,7 +3,6 @@ package export
 import (
 	"encoding/csv"
 	"os"
-	"strconv"
 
 	"grit/db"
 )
@@ -83,7 +82,7 @@ func exportResourceTableCSV(database db.Database, outputPath string, resourceNam
 	resourceCount := 0
 	for _, resource := range resources {
 		row := []string{
-			strconv.FormatInt(resource.ID, 10),
+			resource.ID,
 			resource.Name,
 			resource.ObjectHash,
 			resource.CreatedAt,
