@@ -6,8 +6,8 @@ import (
 	"os"
 
 	"grit/cmd/export"
+	"grit/cmd/progress"
 	"grit/cmd/run"
-	"grit/cmd/status"
 )
 
 func main() {
@@ -31,11 +31,11 @@ func main() {
 		exportCmd.Parse(os.Args[2:])
 		export.Execute()
 
-	case "status":
-		statusCmd := flag.NewFlagSet("status", flag.ExitOnError)
-		status.RegisterFlags(statusCmd)
-		statusCmd.Parse(os.Args[2:])
-		status.Execute()
+	case "progress":
+		progressCmd := flag.NewFlagSet("progress", flag.ExitOnError)
+		progress.RegisterFlags(progressCmd)
+		progressCmd.Parse(os.Args[2:])
+		progress.Execute()
 
 	case "help", "-h", "--help":
 		printUsage()
@@ -54,6 +54,6 @@ func printUsage() {
 	fmt.Println("\nAvailable commands:")
 	fmt.Println("  run       Run the pipeline")
 	fmt.Println("  export    Export resources from the database")
-	fmt.Println("  status    Show pipeline status and statistics")
+	fmt.Println("  progress  Show pipeline progress and statistics")
 	fmt.Println("\nUse 'grit <command> -h' for more information about a command.")
 }
