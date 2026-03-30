@@ -110,17 +110,22 @@ func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledS
 		panic(err)
 	}
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGABRT, os.Interrupt)
+
 	stop := func() {
+		signal.Stop(sigCh)
 		fuseWatcher.Stop()
 		fuseWatcher.WaitForWrites()
+		close(outputChan)
 		database.Close()
 	}
 
 	go func() {
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, syscall.SIGABRT, os.Interrupt, os.Kill)
-		<-c
+		<-sigCh
+		runLogger.Println("Interrupted, shutting down...")
 		stop()
+		os.Exit(1)
 	}()
 
 	return steps, columns, pipeline, fuseWatcher, stop

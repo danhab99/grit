@@ -52,7 +52,9 @@ func (d Database) Close() error {
 }
 
 func (d Database) WaitForResourceCommit() {
-	<-d.resourceListener.Subscribe(0)
+	ch := d.resourceListener.Subscribe(0)
+	<-ch
+	d.resourceListener.Unsubscribe(ch)
 }
 
 // ForceSaveWAL is a no-op. BadgerDB handles compaction automatically.

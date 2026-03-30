@@ -315,8 +315,10 @@ func (f *fuseFile) Release() {
 
 	fuseLogger.Verbosef("release %s\n", f.name)
 
-	// DON'T delete from map - allow file to be opened/written again
-	// Each Create() will replace the entry with fresh data
+	// Free the backing buffer now that content has been sent.
+	f.data.mu.Lock()
+	f.data.content = nil
+	f.data.mu.Unlock()
 
 	// Signal that this file is closed
 	f.watcher.openFiles.Done()

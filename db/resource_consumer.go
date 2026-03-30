@@ -28,6 +28,7 @@ func (thisDB *Database) MakeResourceConsumer() chan fuse.FileData {
 
 	go func() {
 		defer close(batchChan)
+		defer dog.Stop()
 
 		var batch []pendingResource
 
