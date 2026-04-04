@@ -53,15 +53,9 @@ func (d Database) CreateResourceWithTask(name string, objectHash string, created
 			if err := txn.Set(idxResourceProducerKey(id), []byte(*createdByTaskID)); err != nil {
 				return err
 			}
-			// Look up the step name for this task to populate the producer step index
-			task, err := getEntity[Task](txn, taskKey(*createdByTaskID))
-			if err == nil && task != nil {
-				step, err := getEntity[Step](txn, stepKey(task.StepID))
-				if err == nil && step != nil {
-					if err := txn.Set(idxResourceProdStepKey(step.Name, id), nil); err != nil {
-						return err
-					}
-				}
+			// Index by resource name so downstream steps can find outputs by their input names
+			if err := txn.Set(idxResourceProdStepKey(name, id), nil); err != nil {
+				return err
 			}
 		}
 

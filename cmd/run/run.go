@@ -68,14 +68,12 @@ func Execute() {
 	}
 
 	var m manifest.Manifest
-	err = toml.Unmarshal(manifestToml, &m)
-	if err != nil {
+	if err = toml.Unmarshal(manifestToml, &m); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing manifest: %v\n", err)
 		os.Exit(1)
 	}
 	runLogger.Printf("Loaded %d steps and %d columns from manifest\n", len(m.Steps), len(m.Columns))
 
-	// Check disk space before opening database
 	utils.CheckDiskSpace(*dbPath)
 
 	runLogger.Printf("Initializing database at: %s\n", *dbPath)
@@ -86,59 +84,11 @@ func Execute() {
 	}
 	defer database.Close()
 
-	run(m, database, *parallel, enabledSteps, enabledColumns)
-}
-
-func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledSteps []string, enabledColumns []string) ([]db.Step, []db.Column, *pipeline.Pipeline, *fuse.FuseWatcher, func()) {
-	steps := m.RegisterSteps(&database, enabledSteps)
-	columns := m.RegisterColumns(&database, enabledColumns)
-
-	runLogger.Printf("Registered %d steps and %d columns\n", len(steps), len(columns))
-
-	outputChan := database.MakeResourceConsumer()
-
-	fuseWatcher, err := fuse.NewTempDirFuseWatcher(outputChan)
-	if err != nil {
-		panic(err)
-	}
-
-	executor := exec.NewScriptExecutor(&database, fuseWatcher.GetMountPath())
-
-	// Create pipeline with single FUSE server
-	pipeline, err := pipeline.NewPipeline(executor, &database)
-	if err != nil {
-		panic(err)
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGABRT, os.Interrupt)
-
-	stop := func() {
-		signal.Stop(sigCh)
-		fuseWatcher.Stop()
-		fuseWatcher.WaitForWrites()
-		close(outputChan)
-		database.Close()
-	}
-
-	go func() {
-		<-sigCh
-		runLogger.Println("Interrupted, shutting down...")
-		stop()
-		os.Exit(1)
-	}()
-
-	return steps, columns, pipeline, fuseWatcher, stop
-}
-
-func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps []string, enabledColumns []string) {
 	startTime := time.Now()
 
-	// Ingest CSV files before pipeline execution
 	if len(m.CsvFiles) > 0 {
 		csvCount, err := m.IngestCsvFiles(&database)
 		if err != nil {
-			runLogger.Printf("Error ingesting CSV files: %v\n", err)
 			panic(err)
 		}
 		if csvCount > 0 {
@@ -146,69 +96,78 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 		}
 	}
 
-	steps, columns, pipeline, fuseWatcher, stop := constructRunnerPipeline(m, database, enabledSteps, enabledColumns)
+	steps := m.RegisterSteps(&database, enabledSteps)
+	columns := m.RegisterColumns(&database, enabledColumns)
+	runLogger.Printf("Registered %d steps and %d columns\n", len(steps), len(columns))
+
+	outputChan := database.MakeResourceConsumer()
+	fuseWatcher, err := fuse.NewTempDirFuseWatcher(outputChan)
+	if err != nil {
+		panic(err)
+	}
+
+	executor := exec.NewScriptExecutor(&database, fuseWatcher.GetMountPath())
+	p, err := pipeline.NewPipeline(executor, &database)
+	if err != nil {
+		panic(err)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGABRT, os.Interrupt)
+	stop := func() {
+		signal.Stop(sigCh)
+		fuseWatcher.Stop()
+		fuseWatcher.WaitForWrites()
+		close(outputChan)
+		database.Close()
+	}
+	go func() {
+		<-sigCh
+		runLogger.Println("Interrupted, shutting down...")
+		stop()
+		os.Exit(1)
+	}()
 	defer stop()
 
-	// Check if we need to seed
 	resourceCount, err := database.CountResources()
 	if err != nil {
 		panic(err)
 	}
 
-	// Execute all steps
 	var totalStepExecutions int64
 	var totalColumnExecutions int64
 
 	if resourceCount == 0 {
-		runLogger.Printf("No resources found, running seed steps\n")
-
+		runLogger.Println("No resources found, running seed steps")
 		for step := range database.GetStepsWithZeroInputs() {
-			totalStepExecutions += pipeline.ExecuteStep(step, parallel)
+			totalStepExecutions += p.ExecuteStep(step, *parallel)
 		}
-
-		// Wait for seed step outputs to be written to FUSE
 		fuseWatcher.WaitForWrites()
+		database.WaitForResourceCommit()
 
-		// Wait for resource consumer to commit (with timeout polling)
-		for i := 0; i < 50; i++ {
-			resourceCount, err = database.CountResources()
-			if err != nil {
-				panic(err)
-			}
-			if resourceCount > 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
+		resourceCount, err = database.CountResources()
+		if err != nil {
+			panic(err)
+		}
+		if resourceCount == 0 {
+			panic("No resources were seeded")
 		}
 	}
 
-	resourceCount, err = database.CountResources()
-	if err != nil {
-		panic(err)
-	}
-
-	if resourceCount == 0 {
-		panic("No resources were seeded")
-	}
-
-	// run twice to check that everything is done
+	// Run twice to ensure all dependent steps complete.
 	for range 2 {
 		for _, step := range steps {
-			executions := pipeline.ExecuteStep(step, parallel)
+			executions := p.ExecuteStep(step, *parallel)
 			totalStepExecutions += executions
-
 			if executions > 0 {
 				runLogger.Printf("Step %s: executed %d tasks\n", step.Name, executions)
 				fuseWatcher.WaitForWrites()
 				database.WaitForResourceCommit()
 			}
 		}
-
-		// Execute columns after steps have created resources
 		for _, column := range columns {
-			executions := pipeline.ExecuteColumn(column, parallel)
+			executions := p.ExecuteColumn(column, *parallel)
 			totalColumnExecutions += executions
-
 			if executions > 0 {
 				runLogger.Printf("Column %s: executed %d tasks\n", column.Name, executions)
 			}

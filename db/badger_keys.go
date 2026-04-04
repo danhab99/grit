@@ -25,7 +25,7 @@ const (
 	idxResourceByName   = "ix:rn:"  // +{name}\x00{ulid}
 	idxResourceHash     = "ix:rh:"  // +{name}\x00{object_hash} → resource_ulid
 	idxResourceProducer = "ix:rp:"  // +{resource_ulid} → task_ulid
-	idxResourceProdStep = "ix:rps:" // +{step_name}\x00{resource_ulid}
+	idxResourceProdStep = "ix:rps:" // +{resource_name}\x00{resource_ulid}
 	idxColumnByName     = "ix:cn:"  // +{name}\x00{resource_name}\x00{version_08d}\x00{ulid}
 	idxColTaskUnproc    = "ix:ctu:" // +{column_ulid}\x00{ct_ulid}
 	idxColTaskProc      = "ix:ctp:" // +{column_ulid}\x00{ct_ulid}
@@ -83,8 +83,8 @@ func idxResourceProducerKey(resourceID string) []byte {
 	return []byte(idxResourceProducer + resourceID)
 }
 
-func idxResourceProdStepKey(stepName, resourceID string) []byte {
-	return []byte(idxResourceProdStep + stepName + "\x00" + resourceID)
+func idxResourceProdStepKey(resourceName, resourceID string) []byte {
+	return []byte(idxResourceProdStep + resourceName + "\x00" + resourceID)
 }
 
 func idxColumnByNameKey(name, resourceName string, version int, id string) []byte {
@@ -137,8 +137,8 @@ func idxResourceByNamePrefix(name string) []byte {
 	return []byte(idxResourceByName + name + "\x00")
 }
 
-func idxResourceProdStepPrefix(stepName string) []byte {
-	return []byte(idxResourceProdStep + stepName + "\x00")
+func idxResourceProdStepPrefix(resourceName string) []byte {
+	return []byte(idxResourceProdStep + resourceName + "\x00")
 }
 
 func idxColumnByNamePrefix(name string) []byte {

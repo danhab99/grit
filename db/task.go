@@ -432,8 +432,8 @@ func (d Database) ScheduleTasksForStep(stepID string) (int64, error) {
 	// Phase 1: Find resources to schedule (read-only)
 	var toSchedule []string
 	err = d.badgerDB.View(func(txn *badger.Txn) error {
-		for _, inputStepName := range step.Inputs {
-			prefix := idxResourceProdStepPrefix(inputStepName)
+		for _, inputResourceName := range step.Inputs {
+			prefix := idxResourceByNamePrefix(inputResourceName)
 			err := prefixScanKeys(txn, prefix, func(key []byte) (bool, error) {
 				resourceID := string(key[len(prefix):])
 				uniqueKey := idxTaskUniqueKey(stepID, resourceID)
