@@ -320,6 +320,18 @@ func (f *fuseFile) Release() {
 	f.data.content = nil
 	f.data.mu.Unlock()
 
+	// Remove from files map to prevent unbounded growth (memory leak).
+	// Each task creates uniquely-named files that are never Unlink'd,
+	// so without this cleanup the map grows for the entire pipeline run.
+	f.watcher.mu.Lock()
+	delete(f.watcher.files, f.name)
+	// Also clean up the parent directory entry (e.g. "task_xxx") from dirs map.
+	if idx := strings.LastIndex(f.name, "/"); idx > 0 {
+		dirName := f.name[:idx]
+		delete(f.watcher.dirs, dirName)
+	}
+	f.watcher.mu.Unlock()
+
 	// Signal that this file is closed
 	f.watcher.openFiles.Done()
 }
