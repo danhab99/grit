@@ -20,20 +20,22 @@
         lib = pkgs.lib;
 
         grit = import ./nix/lib.nix { inherit lib; };
+
+        grit-bin = pkgs.buildGoModule {
+          pname = "grit";
+          version = import ./changelog;
+          src = self;
+          vendorHash = "sha256-N2fSAG+3V95gzvoWRy8l/U0Ltjb4pvMFxj8pVU+r+X8=";
+          subPackages = [ "." ];
+
+          GO_PATH = "${self.outPath}/.go";
+          CGO_CFLAGS = "-U_FORTIFY_SOURCE";
+          CGO_CPPFLAGS = "-U_FORTIFY_SOURCE";
+        };
       in
       {
         packages = {
-          default = pkgs.buildGoModule {
-            pname = "grit";
-            version = import ./changelog;
-            src = self;
-            vendorHash = "sha256-6zbliSeUKwMS4NEyJCxT8z1IzDFxH47KQ78V6jGpsG4=";
-            subPackages = [ "." ];
-
-            GO_PATH = "${self.outPath}/.go";
-            CGO_CFLAGS = "-U_FORTIFY_SOURCE";
-            CGO_CPPFLAGS = "-U_FORTIFY_SOURCE";
-          };
+          default = grit-bin;
         };
 
         devShells.default = pkgs.mkShell {
@@ -54,6 +56,14 @@
 
           CGO_CFLAGS = "-U_FORTIFY_SOURCE";
           CGO_CPPFLAGS = "-U_FORTIFY_SOURCE";
+        };
+
+        devShells.grit = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            go
+            gopls
+            grit-bin
+          ];
         };
       }
     ))
