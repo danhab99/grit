@@ -32,12 +32,9 @@ func (d Database) CreateTask(task Task) (string, error) {
 			return err
 		}
 
-		// Unique constraint index and input relationship
-		if task.InputResourceID != nil {
-			if err := txn.Set(idxTaskUniqueKey(task.StepID, *task.InputResourceID), []byte(id)); err != nil {
-				return err
-			}
-			if err := txn.Set(idxTaskByInputKey(*task.InputResourceID, id), nil); err != nil {
+// Unique constraint index
+			if task.InputResourceID != nil {
+				if err := txn.Set(idxTaskUniqueKey(task.StepID, *task.InputResourceID), []byte(id)); err != nil {
 				return err
 			}
 		}
@@ -87,9 +84,6 @@ func (d Database) CreateTasksFromResources(stepID string, resourceIDs []string) 
 				return err
 			}
 			if err := txn.Set(uniqueKey, []byte(id)); err != nil {
-				return err
-			}
-			if err := txn.Set(idxTaskByInputKey(resourceID, id), nil); err != nil {
 				return err
 			}
 
@@ -266,7 +260,6 @@ func (d Database) DeleteTask(id string) error {
 		_ = txn.Delete(idxTaskByStepProcKey(t.StepID, id))
 		if t.InputResourceID != nil {
 			_ = txn.Delete(idxTaskUniqueKey(t.StepID, *t.InputResourceID))
-			_ = txn.Delete(idxTaskByInputKey(*t.InputResourceID, id))
 		}
 		return nil
 	})
@@ -358,7 +351,6 @@ func (d Database) MarkStepUndone(stepID string) error {
 			_ = txn.Delete(idxTaskByStepProcKey(stepID, taskID))
 			if t.InputResourceID != nil {
 				_ = txn.Delete(idxTaskUniqueKey(stepID, *t.InputResourceID))
-				_ = txn.Delete(idxTaskByInputKey(*t.InputResourceID, taskID))
 			}
 		}
 
@@ -417,101 +409,110 @@ func idxTaskByStepProcPrefix(stepID string) []byte {
 
 // ScheduleTasksForStep schedules tasks for a step by finding resources produced by input steps
 // that haven't already been consumed by this step.
+//
+// Memory is bounded to scheduleBatchSize resource IDs at a time by using a seek-resume cursor:
+// scan up to batchSize resources in a View, write them in an Update, then resume the scan from
+// the key immediately after the last one processed.
 func (d Database) ScheduleTasksForStep(stepID string) (int64, error) {
 	step, err := d.GetStep(stepID)
 	if err != nil {
 		return 0, err
 	}
-	if step == nil || len(step.Inputs) == 0 {
-		dbLogger.Verbosef("Step %s (%s) has no inputs, skipping scheduling\n", stepID, step.Name)
+	if step == nil || step.Input == "" {
+		dbLogger.Verbosef("Step %s (%s) has no input, skipping scheduling\n", stepID, step.Name)
 		return 0, nil
 	}
 
-	dbLogger.Verbosef("Scheduling tasks for step %s (%s) with inputs: %v\n", stepID, step.Name, step.Inputs)
+	dbLogger.Verbosef("Scheduling tasks for step %s (%s) with input: %s\n", stepID, step.Name, step.Input)
 
-	// Phase 1: Find resources to schedule (read-only)
-	var toSchedule []string
-	err = d.badgerDB.View(func(txn *badger.Txn) error {
-		for _, inputResourceName := range step.Inputs {
-			prefix := idxResourceByNamePrefix(inputResourceName)
-			err := prefixScanKeys(txn, prefix, func(key []byte) (bool, error) {
-				resourceID := string(key[len(prefix):])
-				uniqueKey := idxTaskUniqueKey(stepID, resourceID)
-				if !keyExists(txn, uniqueKey) {
-					toSchedule = append(toSchedule, resourceID)
-				}
-				return true, nil
-			})
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, fmt.Errorf("failed to find resources for scheduling: %w", err)
-	}
-
-	if len(toSchedule) == 0 {
-		dbLogger.Verbosef("No new tasks scheduled for step %s (%s)\n", stepID, step.Name)
-		return 0, nil
-	}
-
-	// Phase 2: Create tasks in batches to avoid exceeding BadgerDB's txn size limit
 	const scheduleBatchSize = 5000
 	var totalScheduled int64
 
-	for batchStart := 0; batchStart < len(toSchedule); batchStart += scheduleBatchSize {
-		batchEnd := batchStart + scheduleBatchSize
-		if batchEnd > len(toSchedule) {
-			batchEnd = len(toSchedule)
-		}
-		batch := toSchedule[batchStart:batchEnd]
+	prefix := idxResourceByNamePrefix(step.Input)
+	cursor := append([]byte{}, prefix...) // start at beginning of prefix
 
-		err = d.badgerDB.Update(func(txn *badger.Txn) error {
-			for _, resourceID := range batch {
-				// Re-check unique constraint inside write txn
-				uniqueKey := idxTaskUniqueKey(stepID, resourceID)
-				if keyExists(txn, uniqueKey) {
-					continue
-				}
+	dbLogger.Verbosef("ScheduleTasksForStep: step=%s input=%s scanning\n", stepID, step.Input)
 
-				id := newULID()
-				resID := resourceID
-				task := Task{
-					ID:              id,
-					StepID:          stepID,
-					InputResourceID: &resID,
-				}
+	for {
+		var batch []string
+		var lastKey []byte
+		var exhausted bool
+		var scanTotal int
 
-				if err := putEntity(txn, taskKey(id), &task); err != nil {
-					return err
-				}
-				if err := txn.Set(idxTaskByStepUnprocKey(stepID, id), nil); err != nil {
-					return err
-				}
-				if err := txn.Set(idxTaskByStepAllKey(stepID, id), nil); err != nil {
-					return err
-				}
-				if err := txn.Set(uniqueKey, []byte(id)); err != nil {
-					return err
-				}
-				if err := txn.Set(idxTaskByInputKey(resourceID, id), nil); err != nil {
-					return err
+		err = d.badgerDB.View(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			opts.PrefetchValues = false
+			it := txn.NewIterator(opts)
+			defer it.Close()
+
+			for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+				key := it.Item().KeyCopy(nil)
+				resourceID := string(key[len(prefix):])
+				scanTotal++
+				batch = append(batch, resourceID)
+				lastKey = key
+				if len(batch) >= scheduleBatchSize {
+					return nil // stop early; resume from lastKey next iteration
 				}
 			}
+			exhausted = true
 			return nil
 		})
 		if err != nil {
-			return totalScheduled, fmt.Errorf("failed to schedule tasks (batch at offset %d): %w", batchStart, err)
+			return totalScheduled, fmt.Errorf("failed to scan resources for step %s: %w", stepID, err)
 		}
 
-		totalScheduled += int64(len(batch))
+		dbLogger.Verbosef("ScheduleTasksForStep: step=%s input=%s scan_window=%d exhausted=%v\n",
+			stepID, step.Input, scanTotal, exhausted)
 
-		if batchEnd < len(toSchedule) {
-			dbLogger.Verbosef("Scheduled %d/%d tasks so far for step %s (%s)\n", totalScheduled, len(toSchedule), stepID, step.Name)
+		if len(batch) > 0 {
+			var written int
+			err = d.badgerDB.Update(func(txn *badger.Txn) error {
+				for _, resourceID := range batch {
+					uniqueKey := idxTaskUniqueKey(stepID, resourceID)
+					if keyExists(txn, uniqueKey) {
+						continue
+					}
+					id := newULID()
+					resID := resourceID
+					task := Task{
+						ID:              id,
+						StepID:          stepID,
+						InputResourceID: &resID,
+					}
+					if err := putEntity(txn, taskKey(id), &task); err != nil {
+						return err
+					}
+					if err := txn.Set(idxTaskByStepUnprocKey(stepID, id), nil); err != nil {
+						return err
+					}
+					if err := txn.Set(idxTaskByStepAllKey(stepID, id), nil); err != nil {
+						return err
+					}
+					if err := txn.Set(uniqueKey, []byte(id)); err != nil {
+						return err
+					}
+					written++
+				}
+				return nil
+			})
+			if err != nil {
+				return totalScheduled, fmt.Errorf("failed to write task batch for step %s: %w", stepID, err)
+			}
+			totalScheduled += int64(written)
+			dbLogger.Verbosef("ScheduleTasksForStep: step=%s input=%s batch_written=%d (race_skipped=%d) total_scheduled=%d\n",
+				stepID, step.Input, written, len(batch)-written, totalScheduled)
 		}
+
+		if exhausted || len(lastKey) == 0 {
+			break
+		}
+		cursor = append(lastKey, 0x00)
 	}
+
+	dbLogger.Verbosef("ScheduleTasksForStep: step=%s input=%s done: scheduled=%d\n",
+		stepID, step.Input, totalScheduled)
 
 	if totalScheduled > 0 {
 		dbLogger.Verbosef("Scheduled %d new tasks for step %s (%s)\n", totalScheduled, stepID, step.Name)

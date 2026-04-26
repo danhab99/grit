@@ -9,14 +9,14 @@ echo "banana" > $OUTPUT_DIR/sort
 
 [[step]]
 name = "upper"
-inputs = ["upper"]
+input = "upper"
 script = '''
 tr '[:lower:]' '[:upper:]' < $INPUT_FILE > $OUTPUT_DIR/done
 '''
 
 [[step]]
 name = "sort"
-inputs = ["sort"]
+input = "sort"
 script = '''
 sort < $INPUT_FILE > $OUTPUT_DIR/done
 '''

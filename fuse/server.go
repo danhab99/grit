@@ -1,7 +1,6 @@
 package fuse
 
 import (
-	"bytes"
 	"os"
 	"strings"
 	"time"
@@ -81,61 +80,21 @@ type fuseFS struct {
 
 func (fs *fuseFS) GetAttr(name string, context *fuse.Context) (*fuse.Attr, fuse.Status) {
 	if name == "" {
-		// Root directory - write-only (allow traversal)
+		// Root directory - write-only
 		return &fuse.Attr{
-			Mode: fuse.S_IFDIR | 0700,
-		}, fuse.OK
-	} 
-
-	// If the path contains a slash (e.g., "task_1/upper"), prefer treating it as a file path.
-	// Only allow one level of nesting (task_x/<name>). If the path has more than one slash, return
-	// ENOENT so nested creations are not permitted. If the file or dir exists, return the proper
-	// attributes; otherwise return ENOENT so the kernel can proceed with Create or Mkdir.
-	if strings.Contains(name, "/") {
-		// Disallow deeper-than-1 nesting
-		if strings.Count(name, "/") > 1 {
-			return nil, fuse.ENOENT
-		}
-
-		fs.watcher.mu.Lock()
-		_, fileExists := fs.watcher.files[name]
-		_, dirExists := fs.watcher.dirs[name]
-		fs.watcher.mu.Unlock()
-		if fileExists {
-			return &fuse.Attr{
-				Mode: fuse.S_IFREG | 0200,
-			}, fuse.OK
-		}
-		if dirExists {
-			return &fuse.Attr{
-				Mode: fuse.S_IFDIR | 0700,
-			}, fuse.OK
-		}
-		// Unknown nested path: report ENOENT so the kernel will attempt Create/Mkdir
-		return nil, fuse.ENOENT
-	} 
-
-	// Single-component paths: treat task_* as directories so scripts can create files beneath them.
-	if strings.HasPrefix(name, "task_") {
-		return &fuse.Attr{
-			Mode: fuse.S_IFDIR | 0700,
-		}, fuse.OK
-	} 
-
-	fs.watcher.mu.Lock()
-	_, exists := fs.watcher.files[name]
-	fs.watcher.mu.Unlock()
-
-	if exists {
-		return &fuse.Attr{
-			Mode: fuse.S_IFREG | 0200, // Write-only file
+			Mode: fuse.S_IFDIR | 0200,
 		}, fuse.OK
 	}
 
-	// Unknown single-component name: expose as a write-only directory to allow scripts to create
-	// subdirectories like task_x without needing an explicit mkdir.
+	// File paths (task_x/filename): return ENOENT so the kernel calls Create.
+	if strings.Contains(name, "/") {
+		return nil, fuse.ENOENT
+	}
+
+	// Single-component paths: treat task_* as directories so scripts can create files beneath them.
+	// All single-component names are directories (task_* subdirs).
 	return &fuse.Attr{
-		Mode: fuse.S_IFDIR | 0700,
+		Mode: fuse.S_IFDIR | 0200,
 	}, fuse.OK
 }
 
@@ -146,16 +105,8 @@ func (fs *fuseFS) OpenDir(name string, context *fuse.Context) ([]fuse.DirEntry, 
 }
 
 func (fs *fuseFS) Mkdir(name string, mode uint32, context *fuse.Context) fuse.Status {
-	// Allow directory creation for task subdirectories (only one level deep)
+	// Allow directory creation for task subdirectories
 	fuseLogger.Verbosef("mkdir %s\n", name)
-	// Reject deeper-than-one-level requests
-	if strings.Count(name, "/") > 1 {
-		fuseLogger.Verbosef("mkdir rejected (too deep): %s\n", name)
-		return fuse.ENOENT
-	}
-	fs.watcher.mu.Lock()
-	defer fs.watcher.mu.Unlock()
-	fs.watcher.dirs[name] = struct{}{}
 	return fuse.OK
 }
 
@@ -177,8 +128,7 @@ func (fs *fuseFS) Open(name string, flags uint32, context *fuse.Context) (nodefs
 	// For write-only filesystem: allow opening any file for write
 	// Each open creates fresh content (like O_TRUNC behavior)
 	fd := &fileData{content: make([]byte, 0)}
-	fs.watcher.files[name] = fd
-	fs.watcher.openFiles.Add(1) // Track this open file
+	fs.watcher.openFiles.Add(1)
 
 	fuseLogger.Verbosef("open %s flags=0x%x (write)\n", name, flags)
 
@@ -199,8 +149,7 @@ func (fs *fuseFS) Create(name string, flags uint32, mode uint32, context *fuse.C
 	}
 
 	fd := &fileData{content: make([]byte, 0)}
-	fs.watcher.files[name] = fd
-	fs.watcher.openFiles.Add(1) // Track this open file
+	fs.watcher.openFiles.Add(1)
 
 	fuseLogger.Verbosef("create %s flags=%d mode=%d\n", name, flags, mode)
 
@@ -213,11 +162,7 @@ func (fs *fuseFS) Create(name string, flags uint32, mode uint32, context *fuse.C
 }
 
 func (fs *fuseFS) Unlink(name string, context *fuse.Context) fuse.Status {
-	fs.watcher.mu.Lock()
-	defer fs.watcher.mu.Unlock()
-
 	fuseLogger.Verbosef("unlink %s\n", name)
-	delete(fs.watcher.files, name)
 	return fuse.OK
 }
 
@@ -233,12 +178,20 @@ func (f *fuseFile) Write(data []byte, off int64) (uint32, fuse.Status) {
 	f.data.mu.Lock()
 	defer f.data.mu.Unlock()
 
-	// Extend buffer if needed
 	newSize := int(off) + len(data)
-	if newSize > len(f.data.content) {
-		newContent := make([]byte, newSize)
+	if newSize > cap(f.data.content) {
+		newCap := cap(f.data.content) * 2
+		if newCap < newSize {
+			newCap = newSize
+		}
+		if newCap < 4096 {
+			newCap = 4096
+		}
+		newContent := make([]byte, newSize, newCap)
 		copy(newContent, f.data.content)
 		f.data.content = newContent
+	} else if newSize > len(f.data.content) {
+		f.data.content = f.data.content[:newSize]
 	}
 
 	// Only log first write to avoid spam for large files
@@ -261,8 +214,11 @@ func (f *fuseFile) Truncate(size uint64) fuse.Status {
 	f.data.mu.Lock()
 	defer f.data.mu.Unlock()
 
-	if uint64(len(f.data.content)) != size {
-		newContent := make([]byte, size)
+	sz := int(size)
+	if sz <= cap(f.data.content) {
+		f.data.content = f.data.content[:sz]
+	} else {
+		newContent := make([]byte, sz)
 		copy(newContent, f.data.content)
 		f.data.content = newContent
 	}
@@ -284,8 +240,12 @@ func (f *fuseFile) Allocate(off uint64, size uint64, mode uint32) fuse.Status {
 	defer f.data.mu.Unlock()
 
 	requiredSize := int(off + size)
-	if requiredSize > len(f.data.content) {
-		newContent := make([]byte, requiredSize)
+	if requiredSize > cap(f.data.content) {
+		newCap := cap(f.data.content) * 2
+		if newCap < requiredSize {
+			newCap = requiredSize
+		}
+		newContent := make([]byte, len(f.data.content), newCap)
 		copy(newContent, f.data.content)
 		f.data.content = newContent
 	}
@@ -293,44 +253,33 @@ func (f *fuseFile) Allocate(off uint64, size uint64, mode uint32) fuse.Status {
 }
 
 func (f *fuseFile) Release() {
-	// When file is closed, consume it
+	// Steal ownership of the buffer — no copy needed.
 	f.data.mu.Lock()
-	content := make([]byte, len(f.data.content))
-	copy(content, f.data.content)
+	content := f.data.content[:len(f.data.content):len(f.data.content)]
+	f.data.content = nil
 	f.data.mu.Unlock()
 
-	if len(content) > 0 {
-		f.watcher.mu.Lock()
-		closed := f.watcher.closed
-		f.watcher.mu.Unlock()
+	f.watcher.mu.Lock()
+	closed := f.watcher.closed
+	f.watcher.mu.Unlock()
 
-		if !closed {
+	if !closed {
+		if len(content) > 0 && f.watcher.outputChan != nil {
 			// Send file data to output channel - blocks until consumed
-			if f.watcher.outputChan != nil {
-				reader := bytes.NewReader(content)
-				f.watcher.outputChan <- FileData{Name: f.name, Reader: reader}
-			}
+			f.watcher.outputChan <- FileData{Name: f.name, Data: content}
+		}
+
+		// Proactively invalidate kernel dentries so the kernel sends FORGET
+		// promptly, preventing pathInode accumulation in go-fuse's inode tree.
+		parts := strings.SplitN(f.name, "/", 2)
+		if len(parts) == 2 {
+			dirName, fileName := parts[0], parts[1]
+			f.watcher.pathNodeFs.EntryNotify(dirName, fileName)
+			f.watcher.pathNodeFs.EntryNotify("", dirName)
 		}
 	}
 
 	fuseLogger.Verbosef("release %s\n", f.name)
-
-	// Free the backing buffer now that content has been sent.
-	f.data.mu.Lock()
-	f.data.content = nil
-	f.data.mu.Unlock()
-
-	// Remove from files map to prevent unbounded growth (memory leak).
-	// Each task creates uniquely-named files that are never Unlink'd,
-	// so without this cleanup the map grows for the entire pipeline run.
-	f.watcher.mu.Lock()
-	delete(f.watcher.files, f.name)
-	// Also clean up the parent directory entry (e.g. "task_xxx") from dirs map.
-	if idx := strings.LastIndex(f.name, "/"); idx > 0 {
-		dirName := f.name[:idx]
-		delete(f.watcher.dirs, dirName)
-	}
-	f.watcher.mu.Unlock()
 
 	// Signal that this file is closed
 	f.watcher.openFiles.Done()

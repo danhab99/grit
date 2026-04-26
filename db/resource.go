@@ -48,17 +48,6 @@ func (d Database) CreateResourceWithTask(name string, objectHash string, created
 			return err
 		}
 
-		// Producer relationship
-		if createdByTaskID != nil {
-			if err := txn.Set(idxResourceProducerKey(id), []byte(*createdByTaskID)); err != nil {
-				return err
-			}
-			// Index by resource name so downstream steps can find outputs by their input names
-			if err := txn.Set(idxResourceProdStepKey(name, id), nil); err != nil {
-				return err
-			}
-		}
-
 		resultID = id
 		return nil
 	})
@@ -221,8 +210,6 @@ func (d Database) DeleteResource(id string) error {
 		_ = txn.Delete(resourceKey(id))
 		_ = txn.Delete(idxResourceByNameKey(r.Name, id))
 		_ = txn.Delete(idxResourceHashKey(r.Name, r.ObjectHash))
-		_ = txn.Delete(idxResourceProducerKey(id))
-		// Note: producer step index cleanup would require knowing the step name
 		return nil
 	})
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"grit/fuse"
 	"grit/watchdog"
-	"io"
 	"strings"
 	"time"
 
@@ -20,22 +19,38 @@ type pendingResource struct {
 }
 
 func (thisDB *Database) MakeResourceConsumer() chan fuse.FileData {
-	inputChan := make(chan fuse.FileData, 100)
+	// Keep this queue intentionally small: each entry can hold a large payload
+	// referenced by a bytes.Reader from FUSE Release(). A large buffile:///tmp/pprof001.svgfer here
+	// allows runaway in-flight memory when tasks finish faster than DB writes.
+	const maxInFlightFiles = 8
+	inputChan := make(chan fuse.FileData, maxInFlightFiles)
 
 	dog := watchdog.NewWatchdog(100 * time.Millisecond)
 
 	batchChan := make(chan []pendingResource)
+	const maxBatchItems = 32
+	const maxBatchBytes = 8 << 20 // 8 MiB cap for buffered payloads
 
 	go func() {
 		defer close(batchChan)
 		defer dog.Stop()
+		defer func() {
+			if r := recover(); r != nil {
+				dbLogger.Printf("Panic in resource producer: %v\n", r)
+			}
+		}()
 
 		var batch []pendingResource
+		var batchBytes int
+		var totalProcessed int64
 
 		flush := func() {
 			if len(batch) > 0 {
+				dbLogger.Verbosef("Flushing batch of %d resources (%d bytes)\n", len(batch), batchBytes)
 				batchChan <- batch
+				totalProcessed += int64(len(batch))
 				batch = nil
+				batchBytes = 0
 			}
 		}
 
@@ -44,71 +59,86 @@ func (thisDB *Database) MakeResourceConsumer() chan fuse.FileData {
 			case in, ok := <-inputChan:
 				if !ok {
 					flush()
+					dbLogger.Verbosef("Resource producer: input channel closed, total processed=%d\n", totalProcessed)
 					return
 				}
 				dog.Pet()
-				dbLogger.Verboseln("Adding resource to transaction", in.Name)
+				dbLogger.Verbosef("Producer: received file %s, current batch size=%d items (%d bytes)\n", in.Name, len(batch), batchBytes)
 
 				parts := strings.Split(in.Name, "/")
 				if len(parts) != 2 {
-					panic("invalid resource name format")
+					dbLogger.Printf("Producer: invalid resource name format: %s\n", in.Name)
+					continue
 				}
 
 				taskID := strings.Split(parts[0], "_")[1]
 				resourceName := strings.Split(parts[1], "_")[0]
 
-				data, err := io.ReadAll(in.Reader)
-				if err != nil {
-					panic(err)
-				}
+				data := in.Data
 
 				hs := sha256.Sum256(data)
 				hash := hex.EncodeToString(hs[:])
 
 				batch = append(batch, pendingResource{resourceName, hash, data, taskID})
+				batchBytes += len(data)
 
-				dbLogger.Verboseln("Added new resources", in.Name, hash, taskID)
-				if len(batch) > 100 {
+				if len(batch) >= maxBatchItems || batchBytes >= maxBatchBytes {
 					flush()
 				}
 
 			case <-dog.Bark:
-				dbLogger.Verboseln("Dog barked, flushing transactions")
+				dbLogger.Verbosef("Producer: watchdog barked, flushing batch size=%d\n", len(batch))
 				flush()
 			}
 		}
 	}()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				dbLogger.Printf("Panic in resource writer: %v\n", r)
+			}
+		}()
+
+		var batchCount int64
+		var itemCount int64
 		for batch := range batchChan {
-			dbLogger.Verboseln("Executing batch write")
+			batchCount++
+			itemCount += int64(len(batch))
+			dbLogger.Verbosef("Writer: processing batch #%d with %d items (total=%d items)\n", batchCount, len(batch), itemCount)
 
 			// First: store all objects via WriteBatch (no conflict possible)
 			wb := thisDB.badgerDB.NewWriteBatch()
 			for _, item := range batch {
 				hashBytes, err := hex.DecodeString(item.hash)
 				if err != nil {
-					panic(err)
+					dbLogger.Printf("Writer: failed to decode hash: %v\n", err)
+					continue
 				}
 				err = wb.Set(objectKey(hashBytes), item.data)
 				if err != nil {
-					panic(err)
+					dbLogger.Printf("Writer: failed to set object in batch: %v\n", err)
+					continue
 				}
 			}
 			err := wb.Flush()
 			if err != nil {
-				panic(err)
+				dbLogger.Printf("Writer: failed to flush write batch: %v\n", err)
+				wb.Cancel()
+				continue
 			}
+			wb.Cancel()
 
 			// Second: create resource metadata + indexes.
-			// Process each item individually to avoid transaction conflicts
-			// when concurrent goroutines read overlapping keys (task/step lookups).
 			for _, item := range batch {
 				thisDB.insertResourceWithRetry(item)
 			}
 
 			// Notify listeners
 			thisDB.resourceListener.Broadcast(nil)
+			if batchCount%10 == 0 {
+				dbLogger.Verbosef("Writer: broadcast milestone - %d batches, %d total items processed\n", batchCount, itemCount)
+			}
 		}
 	}()
 
@@ -119,7 +149,7 @@ const maxConflictRetries = 10
 
 // insertResourceWithRetry inserts a single resource with retry on transaction conflict.
 func (thisDB *Database) insertResourceWithRetry(item pendingResource) {
-	for attempt := 0; attempt < maxConflictRetries; attempt++ {
+	for attempt := range maxConflictRetries {
 		err := thisDB.badgerDB.Update(func(txn *badger.Txn) error {
 			hashIdxKey := idxResourceHashKey(item.resourceName, item.hash)
 			existing, err := getVal(txn, hashIdxKey)
@@ -148,30 +178,6 @@ func (thisDB *Database) insertResourceWithRetry(item pendingResource) {
 			if err := txn.Set(hashIdxKey, []byte(id)); err != nil {
 				return err
 			}
-			if err := txn.Set(idxResourceProducerKey(id), []byte(item.taskID)); err != nil {
-				return err
-			}
-
-			// Look up producer step name for the denormalized index.
-			// Use a separate read-only txn to avoid conflicts on shared task/step keys.
-			var stepName string
-			thisDB.badgerDB.View(func(rtxn *badger.Txn) error {
-				task, err := getEntity[Task](rtxn, taskKey(item.taskID))
-				if err == nil && task != nil {
-					step, err := getEntity[Step](rtxn, stepKey(task.StepID))
-					if err == nil && step != nil {
-						stepName = step.Name
-					}
-				}
-				return nil
-			})
-
-			if stepName != "" {
-				if err := txn.Set(idxResourceProdStepKey(stepName, id), nil); err != nil {
-					return err
-				}
-			}
-
 			return nil
 		})
 
@@ -182,7 +188,7 @@ func (thisDB *Database) insertResourceWithRetry(item pendingResource) {
 			dbLogger.Verbosef("Transaction conflict on resource insert (attempt %d), retrying...\n", attempt+1)
 			continue
 		}
-		panic(err)
+		dbLogger.Printf("Failed to insert resource after %d attempts: %v\n", attempt+1, err)
+		return
 	}
-	panic("failed to insert resource after max retries")
 }

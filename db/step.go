@@ -38,8 +38,8 @@ func (d Database) CreateStep(step Step) (string, error) {
 			return err
 		}
 
-		// Check if latest version matches (same script and inputs)
-		if latestStep != nil && latestStep.Script == step.Script && inputsMatch(latestStep.Inputs, step.Inputs) {
+		// Check if latest version matches (same script and input)
+		if latestStep != nil && latestStep.Script == step.Script && latestStep.Input == step.Input {
 			// Just update parallel if needed
 			latestStep.Parallel = step.Parallel
 			if err := putEntity(txn, stepKey(latestStep.ID), latestStep); err != nil {
@@ -73,25 +73,6 @@ func (d Database) CreateStep(step Step) (string, error) {
 	})
 
 	return resultID, err
-}
-
-func inputsMatch(a, b []string) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	if len(a) != len(b) {
-		return false
-	}
-	am := make(map[string]bool, len(a))
-	for _, v := range a {
-		am[v] = true
-	}
-	for _, v := range b {
-		if !am[v] {
-			return false
-		}
-	}
-	return true
 }
 
 func (d Database) GetStep(id string) (*Step, error) {
@@ -145,7 +126,7 @@ func (d Database) GetStepsWithZeroInputs() chan Step {
 				if err := decode(val, &s); err != nil {
 					return true, nil
 				}
-				if len(s.Inputs) == 0 {
+				if s.Input == "" {
 					ch <- s
 					seen[s.Name] = true
 				}
@@ -272,7 +253,7 @@ func (d Database) GetTaintedSteps() chan Step {
 				}
 				// Emit older versions that differ
 				for _, s := range steps {
-					if s.Version < maxVersion && (s.Script != maxStep.Script || !inputsMatch(s.Inputs, maxStep.Inputs)) {
+					if s.Version < maxVersion && (s.Script != maxStep.Script || s.Input != maxStep.Input) {
 						ch <- s
 					}
 				}

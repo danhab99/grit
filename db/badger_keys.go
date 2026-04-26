@@ -7,32 +7,51 @@ const (
 	prefixStep     = "s:"
 	prefixTask     = "t:"
 	prefixResource = "r:"
-	prefixColumn   = "c:"
-	prefixColTask  = "ct:"
-	prefixColVal   = "cv:"
 	prefixObject   = "o:"
 	prefixMeta     = "m:"
 )
 
-// Index key prefixes
+// Index key prefixes.
+//
+// Key formats use \x00 as a field separator so that prefix scans terminate
+// cleanly at the boundary of each segment.  Versions are zero-padded to 8
+// digits so lexicographic order equals numeric order.
 const (
-	idxStepByName       = "ix:sn:"  // +{name}\x00{version_08d}\x00{ulid}
-	idxTaskByStepUnproc = "ix:tsu:" // +{step_ulid}\x00{task_ulid}
-	idxTaskByStepProc   = "ix:tsp:" // +{step_ulid}\x00{task_ulid}
-	idxTaskByStepAll    = "ix:tsa:" // +{step_ulid}\x00{task_ulid}
-	idxTaskUnique       = "ix:tu:"  // +{step_ulid}\x00{resource_ulid} → task_ulid
-	idxTaskByInput      = "ix:ti:"  // +{resource_ulid}\x00{task_ulid}
-	idxResourceByName   = "ix:rn:"  // +{name}\x00{ulid}
-	idxResourceHash     = "ix:rh:"  // +{name}\x00{object_hash} → resource_ulid
-	idxResourceProducer = "ix:rp:"  // +{resource_ulid} → task_ulid
-	idxResourceProdStep = "ix:rps:" // +{resource_name}\x00{resource_ulid}
-	idxColumnByName     = "ix:cn:"  // +{name}\x00{resource_name}\x00{version_08d}\x00{ulid}
-	idxColTaskUnproc    = "ix:ctu:" // +{column_ulid}\x00{ct_ulid}
-	idxColTaskProc      = "ix:ctp:" // +{column_ulid}\x00{ct_ulid}
-	idxColTaskUnique    = "ix:ctq:" // +{column_ulid}\x00{resource_ulid} → ct_ulid
-	idxColValByColRes   = "ix:cvcr:"// +{column_ulid}\x00{resource_ulid} → cv_ulid
-	idxColValByRes      = "ix:cvr:" // +{resource_ulid}\x00{cv_ulid}
-	idxColValByColName  = "ix:cvn:" // +{column_name}\x00{resource_ulid} → cv_ulid
+	// idxStepByName indexes all versions of a step by name.
+	// Scan the prefix "ix:sn:{name}\x00" to find all versions; the last key
+	// (highest zero-padded version) is the current one.
+	// Key: ix:sn:{name}\x00{version_08d}\x00{step_ulid}
+	idxStepByName = "ix:sn:"
+
+	// idxTaskByStepUnproc is the scheduler's work queue: all tasks for a step
+	// that have not yet been executed.  Deleted from when a task is marked done.
+	// Key: ix:tsu:{step_ulid}\x00{task_ulid}
+	idxTaskByStepUnproc = "ix:tsu:"
+
+	// idxTaskByStepProc mirrors idxTaskByStepUnproc for completed tasks.
+	// Key: ix:tsp:{step_ulid}\x00{task_ulid}
+	idxTaskByStepProc = "ix:tsp:"
+
+	// idxTaskByStepAll covers every task for a step regardless of status.
+	// Used for counts and bulk operations (e.g. MarkStepUndone).
+	// Key: ix:tsa:{step_ulid}\x00{task_ulid}
+	idxTaskByStepAll = "ix:tsa:"
+
+	// idxTaskUnique enforces the constraint that a step processes each input
+	// resource at most once.  Value is the task ULID.
+	// Key: ix:tu:{step_ulid}\x00{resource_ulid}  →  task_ulid
+	idxTaskUnique = "ix:tu:"
+
+	// idxResourceByName lists all resources with a given name ordered by ULID
+	// (creation time).  This is the index ScheduleTasksForStep pages through.
+	// Key: ix:rn:{name}\x00{resource_ulid}
+	idxResourceByName = "ix:rn:"
+
+	// idxResourceHash deduplicates resources: same (name, content) reuses the
+	// existing record.  Value is the resource ULID.
+	// Key: ix:rh:{name}\x00{object_hash}  →  resource_ulid
+	idxResourceHash = "ix:rh:"
+
 )
 
 // --- Primary key builders ---
@@ -40,9 +59,6 @@ const (
 func stepKey(id string) []byte     { return []byte(prefixStep + id) }
 func taskKey(id string) []byte     { return []byte(prefixTask + id) }
 func resourceKey(id string) []byte { return []byte(prefixResource + id) }
-func columnKey(id string) []byte   { return []byte(prefixColumn + id) }
-func colTaskKey(id string) []byte  { return []byte(prefixColTask + id) }
-func colValKey(id string) []byte   { return []byte(prefixColVal + id) }
 func objectKey(hash []byte) []byte { return append([]byte(prefixObject), hash...) }
 
 // --- Index key builders ---
@@ -67,52 +83,12 @@ func idxTaskUniqueKey(stepID, resourceID string) []byte {
 	return []byte(idxTaskUnique + stepID + "\x00" + resourceID)
 }
 
-func idxTaskByInputKey(resourceID, taskID string) []byte {
-	return []byte(idxTaskByInput + resourceID + "\x00" + taskID)
-}
-
 func idxResourceByNameKey(name, id string) []byte {
 	return []byte(idxResourceByName + name + "\x00" + id)
 }
 
 func idxResourceHashKey(name, objectHash string) []byte {
 	return []byte(idxResourceHash + name + "\x00" + objectHash)
-}
-
-func idxResourceProducerKey(resourceID string) []byte {
-	return []byte(idxResourceProducer + resourceID)
-}
-
-func idxResourceProdStepKey(resourceName, resourceID string) []byte {
-	return []byte(idxResourceProdStep + resourceName + "\x00" + resourceID)
-}
-
-func idxColumnByNameKey(name, resourceName string, version int, id string) []byte {
-	return []byte(fmt.Sprintf("%s%s\x00%s\x00%08d\x00%s", idxColumnByName, name, resourceName, version, id))
-}
-
-func idxColTaskUnprocKey(columnID, ctID string) []byte {
-	return []byte(idxColTaskUnproc + columnID + "\x00" + ctID)
-}
-
-func idxColTaskProcKey(columnID, ctID string) []byte {
-	return []byte(idxColTaskProc + columnID + "\x00" + ctID)
-}
-
-func idxColTaskUniqueKey(columnID, resourceID string) []byte {
-	return []byte(idxColTaskUnique + columnID + "\x00" + resourceID)
-}
-
-func idxColValByColResKey(columnID, resourceID string) []byte {
-	return []byte(idxColValByColRes + columnID + "\x00" + resourceID)
-}
-
-func idxColValByResKey(resourceID, cvID string) []byte {
-	return []byte(idxColValByRes + resourceID + "\x00" + cvID)
-}
-
-func idxColValByColNameKey(columnName, resourceID string) []byte {
-	return []byte(idxColValByColName + columnName + "\x00" + resourceID)
 }
 
 // --- Prefix builders for scans ---
@@ -129,32 +105,8 @@ func idxTaskByStepAllPrefix(stepID string) []byte {
 	return []byte(idxTaskByStepAll + stepID + "\x00")
 }
 
-func idxTaskByInputPrefix(resourceID string) []byte {
-	return []byte(idxTaskByInput + resourceID + "\x00")
-}
-
 func idxResourceByNamePrefix(name string) []byte {
 	return []byte(idxResourceByName + name + "\x00")
-}
-
-func idxResourceProdStepPrefix(resourceName string) []byte {
-	return []byte(idxResourceProdStep + resourceName + "\x00")
-}
-
-func idxColumnByNamePrefix(name string) []byte {
-	return []byte(idxColumnByName + name + "\x00")
-}
-
-func idxColumnByNameResPrefix(name, resourceName string) []byte {
-	return []byte(fmt.Sprintf("%s%s\x00%s\x00", idxColumnByName, name, resourceName))
-}
-
-func idxColTaskUnprocPrefix(columnID string) []byte {
-	return []byte(idxColTaskUnproc + columnID + "\x00")
-}
-
-func idxColValByResPrefix(resourceID string) []byte {
-	return []byte(idxColValByRes + resourceID + "\x00")
 }
 
 // --- Meta key builders ---

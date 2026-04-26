@@ -2,7 +2,6 @@ package fuse
 
 import (
 	"grit/log"
-	"io"
 	"os"
 	"sync"
 	"time"
@@ -14,20 +13,19 @@ import (
 
 // FuseWatcher watches a FUSE mount point and consumes files written to it
 type FuseWatcher struct {
-	mountPath  string
-	server     *fuse.Server
+	mountPath     string
+	server        *fuse.Server
+	pathNodeFs    *pathfs.PathNodeFs
 	mu         sync.Mutex
-	files      map[string]*fileData
-	dirs       map[string]struct{}
 	closed     bool
-	outputChan chan<- FileData
-	openFiles  sync.WaitGroup // Track open files
+	outputChan    chan<- FileData
+	openFiles     sync.WaitGroup // Track open files
 }
 
 // FileData contains the filename and content of a file written to the FUSE mount
 type FileData struct {
-	Name   string
-	Reader io.Reader
+	Name string
+	Data []byte
 }
 
 type fileData struct {
@@ -48,16 +46,15 @@ func NewFuseWatcher(mountPath string, outputChan chan<- FileData) (*FuseWatcher,
 
 	fw := &FuseWatcher{
 		mountPath:  mountPath,
-		files:      make(map[string]*fileData),
-		dirs:       make(map[string]struct{}),
 		outputChan: outputChan,
-	} 
+	}
 
-	fs := pathfs.NewPathNodeFs(&fuseFS{
+	pnfs := pathfs.NewPathNodeFs(&fuseFS{
 		FileSystem: pathfs.NewDefaultFileSystem(),
 		watcher:    fw,
 	}, nil)
-	server, _, err := nodefs.MountRoot(mountPath, fs.Root(), &nodefs.Options{
+	fw.pathNodeFs = pnfs
+	server, _, err := nodefs.MountRoot(mountPath, pnfs.Root(), &nodefs.Options{
 		AttrTimeout:  time.Second,
 		EntryTimeout: time.Second,
 	})
