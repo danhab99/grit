@@ -14,7 +14,7 @@ import (
 
 	"grit/db"
 	"grit/exec"
-	"grit/fuse"
+	"grit/types"
 	"grit/log"
 	"grit/manifest"
 	"grit/pipeline"
@@ -103,29 +103,20 @@ func Execute() {
 	run(m, database, *parallel, enabledSteps)
 }
 
-func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledSteps []string) ([]db.Step, *pipeline.Pipeline, *fuse.FuseWatcher, func()) {
+func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledSteps []string) ([]types.Step, *pipeline.Pipeline, func()) {
 	steps := m.RegisterSteps(&database, enabledSteps)
 
 	runLogger.Printf("Registered %d steps\n", len(steps))
 
-	outputChan := database.MakeResourceConsumer()
+	executor := exec.NewScriptExecutor(&database)
 
-	fuseWatcher, err := fuse.NewTempDirFuseWatcher(outputChan)
-	if err != nil {
-		panic(err)
-	}
-
-	executor := exec.NewScriptExecutor(&database, fuseWatcher.GetMountPath())
-
-	// Create pipeline with single FUSE server
+	// Create pipeline
 	pipeline, err := pipeline.NewPipeline(executor, &database)
 	if err != nil {
 		panic(err)
 	}
 
 	stop := func() {
-		fuseWatcher.Stop()
-		fuseWatcher.WaitForWrites()
 		database.Close()
 	}
 
@@ -136,7 +127,7 @@ func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledS
 		stop()
 	}()
 
-	return steps, pipeline, fuseWatcher, stop
+	return steps, pipeline, stop
 }
 
 func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps []string) {
@@ -154,7 +145,7 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 		}
 	}
 
-	steps, pipeline, fuseWatcher, stop := constructRunnerPipeline(m, database, enabledSteps)
+	steps, pipeline, stop := constructRunnerPipeline(m, database, enabledSteps)
 	defer stop()
 
 	// Check if we need to seed
@@ -171,21 +162,6 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 
 		for step := range database.GetStepsWithZeroInputs() {
 			totalStepExecutions += pipeline.ExecuteStep(step, parallel)
-		}
-
-		// Wait for seed step outputs to be written to FUSE
-		fuseWatcher.WaitForWrites()
-
-		// Wait for resource consumer to commit (with timeout polling)
-		for i := 0; i < 50; i++ {
-			resourceCount, err = database.CountResources()
-			if err != nil {
-				panic(err)
-			}
-			if resourceCount > 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
 		}
 	}
 
@@ -206,8 +182,6 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 
 			if executions > 0 {
 				runLogger.Printf("Step %s: executed %d tasks\n", step.Name, executions)
-				fuseWatcher.WaitForWrites()
-				database.WaitForResourceCommit()
 			}
 		}
 	}

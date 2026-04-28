@@ -2,7 +2,6 @@ package db
 
 import (
 	"fmt"
-	"grit/broadcast"
 	"grit/log"
 	"os"
 
@@ -14,6 +13,10 @@ var dbLogger = log.NewLogger("DB")
 func NewDatabase(repo_path string) (Database, error) {
 	err := os.MkdirAll(repo_path, 0755)
 	if err != nil {
+		return Database{}, err
+	}
+
+	if err := os.MkdirAll(repo_path+"/objects", 0755); err != nil {
 		return Database{}, err
 	}
 
@@ -38,10 +41,8 @@ func NewDatabase(repo_path string) (Database, error) {
 		return Database{}, fmt.Errorf("failed to open BadgerDB: %w", err)
 	}
 
-	b := broadcast.NewBroadcaster[any]()
-
 	dbLogger.Println("Database ready")
-	return Database{repo_path, badgerDB, b}, nil
+	return Database{repo_path, badgerDB}, nil
 }
 
 func (d Database) Close() error {
@@ -51,13 +52,8 @@ func (d Database) Close() error {
 	return nil
 }
 
-func (d Database) WaitForResourceCommit() {
-	ch := d.resourceListener.Subscribe(0)
-	<-ch
-	d.resourceListener.Unsubscribe(ch)
-}
-
 // ForceSaveWAL is a no-op. BadgerDB handles compaction automatically.
 func (d Database) ForceSaveWAL() error {
 	return nil
 }
+

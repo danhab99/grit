@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"grit/db"
 	"grit/log"
+	"grit/types"
 	"os"
 	"os/exec"
 	"sync"
@@ -12,17 +13,16 @@ import (
 )
 
 type ScriptExecutor struct {
-	db        *db.Database
-	mountPath string
+	db *db.Database
 }
 
-func NewScriptExecutor(db *db.Database, mountPath string) *ScriptExecutor {
-	return &ScriptExecutor{db, mountPath}
+func NewScriptExecutor(db *db.Database) *ScriptExecutor {
+	return &ScriptExecutor{db}
 }
 
 var executeLogger = log.NewLogger("EXEC")
 
-// func (e *ScriptExecutor) ExecuteStep(step db.Step, defaultParallel int) error {
+// func (e *ScriptExecutor) ExecuteStep(step types.Step, defaultParallel int) error {
 // 	database := e.db
 // 	executeLogger.Println("Running unfinished tasks for step", step.Name)
 
@@ -31,7 +31,7 @@ var executeLogger = log.NewLogger("EXEC")
 // 		p = min(defaultParallel, *step.Parallel)
 // 	}
 
-// 	workers.Parallel0(database.GetUnprocessedTasks(step.ID), p, func(task db.Task) {
+// 	workers.Parallel0(database.GetUnprocessedTasks(step.ID), p, func(task types.Task) {
 // 		err := e.Execute(task, step)
 // 		if err != nil {
 // 			panic(err)
@@ -41,7 +41,7 @@ var executeLogger = log.NewLogger("EXEC")
 // 	return nil
 // }
 
-func (e *ScriptExecutor) Execute(task db.Task, step db.Step) error {
+func (e *ScriptExecutor) Execute(task types.Task, step types.Step) error {
 	// executeLogger.Printf("Executing task ID=%d for step '%s' (step_id=%d)\n", task.ID, step.Name, task.StepID)
 	start := time.Now()
 
@@ -58,13 +58,35 @@ func (e *ScriptExecutor) Execute(task db.Task, step db.Step) error {
 	}
 	inputFile.Close()
 
+	// Create output directory
+	outputDir, err := os.MkdirTemp("", "grit-output-*")
+	if err != nil {
+		return fmt.Errorf("failed to create output dir: %w", err)
+	}
+	defer os.RemoveAll(outputDir)
+
 	// Execute the script
 	executeLogger.Verbosef("Executing: %s\n", step.Script)
-	cmd := e.buildCommand(step, inputFile.Name(), e.mountPath, task.ID)
+	cmd := e.buildCommand(step, inputFile.Name(), outputDir, task.ID)
 
 	// Run script and capture output
 	if err := e.runScript(cmd, step); err != nil {
 		return err
+	}
+
+	// Ingest output files synchronously
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		return fmt.Errorf("failed to read output dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := outputDir + "/" + entry.Name()
+		if err := e.db.IngestFile(path, entry.Name(), task.ID); err != nil {
+			return fmt.Errorf("failed to ingest output file %s: %w", entry.Name(), err)
+		}
 	}
 
 	elapsedTime := time.Since(start)
@@ -73,7 +95,7 @@ func (e *ScriptExecutor) Execute(task db.Task, step db.Step) error {
 	return nil
 }
 
-func (e *ScriptExecutor) prepareInput(task db.Task, inputFile *os.File) error {
+func (e *ScriptExecutor) prepareInput(task types.Task, inputFile *os.File) error {
 	// Get input resource if task has one
 	if task.InputResourceID != nil {
 		inputResource, err := e.db.GetResource(*task.InputResourceID)
@@ -98,24 +120,16 @@ func (e *ScriptExecutor) prepareInput(task db.Task, inputFile *os.File) error {
 	return nil
 }
 
-func (e *ScriptExecutor) buildCommand(step db.Step, inputFile, outputDir string, taskID string) *exec.Cmd {
+func (e *ScriptExecutor) buildCommand(step types.Step, inputFile, outputDir string, taskID string) *exec.Cmd {
 	cmd := exec.Command("sh", "-c", step.Script)
-	outdir := fmt.Sprintf("%s/task_%s", outputDir, taskID)
-
-	// Ensure the per-task output directory exists (creates via FUSE)
-	if err := os.MkdirAll(outdir, 0755); err != nil {
-		executeLogger.Printf("Error creating output dir %s: %v\n", outdir, err)
-		panic(err)
-	}
-
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("INPUT_FILE=%s", inputFile),
-		fmt.Sprintf("OUTPUT_DIR=%s", outdir),
+		fmt.Sprintf("OUTPUT_DIR=%s", outputDir),
 	)
 	return cmd
 }
 
-func (e *ScriptExecutor) runScript(cmd *exec.Cmd, step db.Step) error {
+func (e *ScriptExecutor) runScript(cmd *exec.Cmd, step types.Step) error {
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create stdout pipe: %w", err)

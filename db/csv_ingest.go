@@ -94,54 +94,12 @@ func (d *Database) IngestCsvFile(path string, outputName string) (int64, error) 
 			return nil
 		}
 
-		// Store objects via WriteBatch
-		wb := d.badgerDB.NewWriteBatch()
-		defer wb.Cancel()
 		for _, item := range objectBatch {
-			hashBytes, err := hex.DecodeString(item.hash)
-			if err != nil {
-				return fmt.Errorf("failed to decode hash: %w", err)
+			if err := d.StoreObject(item.hash, item.data); err != nil {
+				return fmt.Errorf("failed to store object: %w", err)
 			}
-			if err := wb.Set(objectKey(hashBytes), item.data); err != nil {
-				return fmt.Errorf("failed to set object in batch: %w", err)
-			}
-		}
-		if err := wb.Flush(); err != nil {
-			return fmt.Errorf("failed to flush object batch: %w", err)
-		}
-
-		// Create resource records with producer step index
-		for _, item := range objectBatch {
-			err := d.badgerDB.Update(func(txn *badger.Txn) error {
-				hashKey := idxResourceHashKey(outputName, item.hash)
-				existing, err := getVal(txn, hashKey)
-				if err != nil {
-					return err
-				}
-				if existing != nil {
-					return nil // already exists
-				}
-
-				id := newULID()
-				res := Resource{
-					ID:         id,
-					Name:       outputName,
-					ObjectHash: item.hash,
-					CreatedAt:  nowTimestamp(),
-				}
-
-				if err := putEntity(txn, resourceKey(id), &res); err != nil {
-					return err
-				}
-				if err := txn.Set(idxResourceByNameKey(outputName, id), nil); err != nil {
-					return err
-				}
-				if err := txn.Set(hashKey, []byte(id)); err != nil {
-					return err
-				}
-				return nil
-			})
-			if err != nil {
+			backend := d.StorageBackendForSize(len(item.data))
+			if err := d.insertResource(outputName, item.hash, "", backend); err != nil {
 				return fmt.Errorf("failed to create resource: %w", err)
 			}
 		}
@@ -192,9 +150,6 @@ func (d *Database) IngestCsvFile(path string, outputName string) (int64, error) 
 	if err := d.setCsvFileHash(path, fileHash); err != nil {
 		return count, fmt.Errorf("failed to store CSV file hash: %w", err)
 	}
-
-	// Notify listeners that resources are available
-	d.resourceListener.Broadcast(nil)
 
 	dbLogger.Printf("CSV ingest complete: %d rows from %s\n", count, path)
 	return count, nil

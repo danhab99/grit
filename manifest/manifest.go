@@ -3,6 +3,7 @@ package manifest
 import (
 	"fmt"
 	"grit/db"
+	"grit/types"
 	"slices"
 )
 
@@ -23,11 +24,11 @@ type ManifestStep struct {
 	Input    string `toml:"input"`
 }
 
-func (manifest Manifest) RegisterSteps(database *db.Database, enabledSteps []string) []db.Step {
+func (manifest Manifest) RegisterSteps(database *db.Database, enabledSteps []string) []types.Step {
 	// Register all steps from manifest
-	var steps []db.Step
+	var steps []types.Step
 	for _, manifestStep := range manifest.Steps {
-		step := db.Step{
+		step := types.Step{
 			Name:     manifestStep.Name,
 			Script:   manifestStep.Script,
 			Parallel: manifestStep.Parallel,

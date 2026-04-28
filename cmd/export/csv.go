@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"grit/db"
+	"grit/types"
 )
 
 func exportResourceTableCSV(database db.Database, outputPath string, resourceName string) {
@@ -28,7 +29,7 @@ func exportResourceTableCSV(database db.Database, outputPath string, resourceNam
 	}
 	defer writer.Flush()
 
-	var resourceChan chan db.Resource
+	var resourceChan chan types.Resource
 	if resourceName != "" {
 		resourceChan = database.GetResourcesByName(resourceName)
 	} else {

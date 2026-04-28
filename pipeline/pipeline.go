@@ -7,6 +7,7 @@ import (
 	"grit/db"
 	"grit/exec"
 	"grit/log"
+	"grit/types"
 
 	"github.com/danhab99/idk/workers"
 )
@@ -22,13 +23,13 @@ func NewPipeline(executor *exec.ScriptExecutor, database *db.Database) (*Pipelin
 	return &Pipeline{database, executor}, nil
 }
 
-func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
+func (p *Pipeline) ExecuteStep(step types.Step, maxParallel int) int64 {
 	database := p.database
 
 	if step.Input == "" {
 		pipelineLogger.Printf("Executing seed step %s\n", step.Name)
 
-		var startTask db.Task
+		var startTask types.Task
 
 		startStepCount, err := database.CountTasksForStep(step.ID)
 		if err != nil {
@@ -38,7 +39,7 @@ func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
 		if startStepCount > 0 {
 			startTask = <-database.GetTasksForStep(step.ID)
 		} else {
-			t, err := database.CreateAndGetTask(db.Task{
+			t, err := database.CreateAndGetTask(types.Task{
 				StepID: step.ID,
 			})
 			if err != nil {
@@ -91,7 +92,7 @@ func (p *Pipeline) ExecuteStep(step db.Step, maxParallel int) int64 {
 		pr = &x
 	}
 
-	workers.Parallel0(taskChan, *pr, func(task db.Task) {
+	workers.Parallel0(taskChan, *pr, func(task types.Task) {
 		pipelineLogger.Verbosef("Executing task %s for step %s\n", task.ID, step.Name)
 
 		execErr := p.executor.Execute(task, step)
