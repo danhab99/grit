@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"runtime"
+	"sync"
 	"sync/atomic"
 
 	"grit/db"
@@ -92,6 +93,36 @@ func (p *Pipeline) ExecuteStep(step types.Step, maxParallel int) int64 {
 		pr = &x
 	}
 
+	// Streaming flusher: writes status updates in bounded batches as tasks
+	// complete, so the in-memory buffer never grows larger than 2×flushBatch
+	// regardless of how many tasks the step contains.
+	const flushBatch = 500
+	updateCh := make(chan db.TaskStatusUpdate, flushBatch*2)
+
+	var flusherDone sync.WaitGroup
+	flusherDone.Add(1)
+	var flushLastErr error
+	go func() {
+		defer flusherDone.Done()
+		buf := make([]db.TaskStatusUpdate, 0, flushBatch)
+		flush := func() {
+			if len(buf) == 0 {
+				return
+			}
+			if err := database.BatchUpdateTaskStatus(buf); err != nil {
+				flushLastErr = err
+			}
+			buf = buf[:0]
+		}
+		for u := range updateCh {
+			buf = append(buf, u)
+			if len(buf) >= flushBatch {
+				flush()
+			}
+		}
+		flush()
+	}()
+
 	workers.Parallel0(taskChan, *pr, func(task types.Task) {
 		pipelineLogger.Verbosef("Executing task %s for step %s\n", task.ID, step.Name)
 
@@ -104,13 +135,16 @@ func (p *Pipeline) ExecuteStep(step types.Step, maxParallel int) int64 {
 			pipelineLogger.Printf("Task %s failed: %v\n", task.ID, execErr)
 		}
 
-		err = database.UpdateTaskStatus(task.ID, true, errorMsg)
-		if err != nil {
-			pipelineLogger.Printf("Error updating task %s: %v\n", task.ID, err)
-		}
-
+		updateCh <- db.TaskStatusUpdate{ID: task.ID, Processed: true, Error: errorMsg}
 		executionCount.Add(1)
 	})
+
+	close(updateCh)
+	flusherDone.Wait()
+
+	if flushLastErr != nil {
+		pipelineLogger.Printf("Error flushing task statuses for step %s: %v\n", step.Name, flushLastErr)
+	}
 
 	return executionCount.Load()
 }

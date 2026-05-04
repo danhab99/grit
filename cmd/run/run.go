@@ -2,6 +2,7 @@
 package run
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"net/http"
@@ -9,8 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
+	"runtime/pprof"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+	"path/filepath"
 
 	"grit/db"
 	"grit/exec"
@@ -27,11 +33,13 @@ var runLogger = log.NewLogger("RUN")
 
 // Command flags
 var (
-	manifestPath *string
-	dbPath       *string
-	parallel     *int
-	enabledSteps stringSlice
-	pprofAddr    *string
+	manifestPath    *string
+	dbPath          *string
+	parallel        *int
+	enabledSteps    stringSlice
+	pprofAddr       *string
+	profileDir      *string
+	profileInterval *time.Duration
 )
 
 type stringSlice []string
@@ -52,12 +60,23 @@ func RegisterFlags(fs *flag.FlagSet) {
 	parallel = fs.Int("parallel", runtime.NumCPU(), "number of processes to run in parallel")
 	fs.Var(&enabledSteps, "step", "steps to run (can be specified multiple times)")
 	pprofAddr = fs.String("pprof", "", "enable pprof HTTP server on this address (e.g. :6060)")
+	profileDir = fs.String("profiledir", "", "directory to write periodic heap/cpu profiles into")
+	profileInterval = fs.Duration("profileinterval", 30*time.Second, "how often to write profiles when -profiledir is set")
 }
 
 // Execute runs the pipeline
 func Execute() {
 	// Set before any allocations so every allocation is sampled.
 	runtime.MemProfileRate = 1
+
+	if *profileDir != "" {
+		if err := os.MkdirAll(*profileDir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating profile dir: %v\n", err)
+			os.Exit(1)
+		}
+		stopSnapshots := startPeriodicProfiles(*profileDir, *profileInterval)
+		defer stopSnapshots()
+	}
 
 	if *pprofAddr != "" {
 		go func() {
@@ -100,7 +119,167 @@ func Execute() {
 	}
 	defer database.Close()
 
+	// Limit the Go heap to 512 MB so the GC scavenger returns idle pages to
+	// the OS aggressively instead of sitting on hundreds of MB indefinitely.
+	debug.SetMemoryLimit(512 << 20)
+
+	stopGC := make(chan struct{})
+	database.StartValueLogGC(30*time.Second, stopGC)
+	defer close(stopGC)
+
+	stopMem := startMemoryLogger(30 * time.Second)
+	defer stopMem()
+
 	run(m, database, *parallel, enabledSteps)
+}
+
+// readRSSKB returns the current process RSS in kilobytes by reading
+// /proc/self/status (Linux only). Returns 0 on any error.
+func readRSSKB() int64 {
+	f, err := os.Open("/proc/self/status")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "VmRSS:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				v, _ := strconv.ParseInt(fields[1], 10, 64)
+				return v
+			}
+		}
+	}
+	return 0
+}
+
+// startMemoryLogger logs Go heap and process RSS at the given interval.
+func startMemoryLogger(interval time.Duration) func() {
+	ticker := time.NewTicker(interval)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				rssKB := readRSSKB()
+				runLogger.Printf("MEM heap_inuse=%dMB heap_sys=%dMB rss=%dMB goroutines=%d\n",
+					ms.HeapInuse/1024/1024,
+					ms.HeapSys/1024/1024,
+					rssKB/1024,
+					runtime.NumGoroutine())
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		ticker.Stop()
+		close(done)
+	}
+}
+
+// startPeriodicProfiles writes heap and CPU profiles to dir at every interval.
+// Each tick produces:
+//   profiles/heap_001.pprof  – inuse/alloc heap snapshot
+//   profiles/cpu_001.pprof   – CPU activity over the interval
+//
+// Returns a stop func that flushes one final snapshot before returning.
+func startPeriodicProfiles(dir string, interval time.Duration) func() {
+	seq := 0
+	writeSnapshot := func(label string) {
+		seq++
+		tag := fmt.Sprintf("%s%03d", label, seq)
+
+		// heap
+		heapPath := filepath.Join(dir, tag+"_heap.pprof")
+		if f, err := os.Create(heapPath); err == nil {
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				runLogger.Printf("heap profile write error: %v\n", err)
+			}
+			f.Close()
+			runLogger.Printf("heap profile → %s\n", heapPath)
+		} else {
+			runLogger.Printf("heap profile create error: %v\n", err)
+		}
+
+		// goroutine snapshot (cheap; useful for leak detection alongside heap)
+		gorPath := filepath.Join(dir, tag+"_goroutines.txt")
+		if f, err := os.Create(gorPath); err == nil {
+			pprof.Lookup("goroutine").WriteTo(f, 1)
+			f.Close()
+		}
+	}
+
+	// CPU profile runs for one interval, then rotates.
+	startCPU := func(tag string) (*os.File, error) {
+		cpuPath := filepath.Join(dir, tag+"_cpu.pprof")
+		f, err := os.Create(cpuPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			f.Close()
+			return nil, err
+		}
+		return f, nil
+	}
+
+	cpuSeq := 0
+	nextCPUTag := func() string {
+		cpuSeq++
+		return fmt.Sprintf("cpu%03d", cpuSeq)
+	}
+
+	// Start first CPU interval immediately.
+	cpuFile, cpuErr := startCPU(nextCPUTag())
+	if cpuErr != nil {
+		runLogger.Printf("CPU profile start error: %v\n", cpuErr)
+	}
+
+	runLogger.Printf("Periodic profiling every %s → %s\n", interval, dir)
+
+	ticker := time.NewTicker(interval)
+	done := make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				// Stop current CPU interval and save it.
+				if cpuFile != nil {
+					pprof.StopCPUProfile()
+					cpuFile.Close()
+					runLogger.Printf("cpu profile → %s\n", cpuFile.Name())
+					cpuFile = nil
+				}
+				writeSnapshot("snap")
+				// Begin next CPU interval.
+				cpuFile, cpuErr = startCPU(nextCPUTag())
+				if cpuErr != nil {
+					runLogger.Printf("CPU profile start error: %v\n", cpuErr)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	stop := func() {
+		ticker.Stop()
+		close(done)
+		if cpuFile != nil {
+			pprof.StopCPUProfile()
+			cpuFile.Close()
+			runLogger.Printf("cpu profile → %s\n", cpuFile.Name())
+		}
+		writeSnapshot("final")
+	}
+	return stop
 }
 
 func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledSteps []string) ([]types.Step, *pipeline.Pipeline, func()) {
@@ -183,6 +362,11 @@ func run(m manifest.Manifest, database db.Database, parallel int, enabledSteps [
 			if executions > 0 {
 				runLogger.Printf("Step %s: executed %d tasks\n", step.Name, executions)
 			}
+
+			// After each step, return idle Go heap pages to the OS so that
+			// long multi-day runs don't accumulate RSS from previous steps.
+			runtime.GC()
+			debug.FreeOSMemory()
 		}
 	}
 
