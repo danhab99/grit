@@ -13,8 +13,9 @@ type Manifest struct {
 }
 
 type ManifestCsvFile struct {
-	Path   string `toml:"path"`
-	Output string `toml:"output"`
+	Path    string   `toml:"path"`
+	Output  string   `toml:"output"`
+	Columns []string `toml:"columns"`
 }
 
 type ManifestStep struct {
@@ -59,7 +60,7 @@ func (manifest Manifest) RegisterSteps(database *db.Database, enabledSteps []str
 func (manifest Manifest) IngestCsvFiles(database *db.Database) (int64, error) {
 	var total int64
 	for _, csvFile := range manifest.CsvFiles {
-		count, err := database.IngestCsvFile(csvFile.Path, csvFile.Output)
+		count, err := database.IngestCsvFile(csvFile.Path, csvFile.Output, csvFile.Columns)
 		if err != nil {
 			return total, fmt.Errorf("failed to ingest CSV file %s: %w", csvFile.Path, err)
 		}

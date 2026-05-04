@@ -51,6 +51,7 @@ func (e *ScriptExecutor) Execute(task types.Task, step types.Step) error {
 		return fmt.Errorf("failed to create input file: %w", err)
 	}
 	defer os.Remove(inputFile.Name())
+	defer inputFile.Close()
 
 	// Write input data if exists
 	if err := e.prepareInput(task, inputFile); err != nil {
