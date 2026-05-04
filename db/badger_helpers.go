@@ -15,6 +15,16 @@ var (
 	ulidEntropy = ulid.Monotonic(rand.Reader, 0)
 )
 
+// scanBatchSize is the maximum number of index entries read per View transaction
+// in paginated channel functions. Keeps each transaction short-lived so badger
+// MVCC GC is not blocked, while bounding the in-memory slice to a fixed size.
+const scanBatchSize = 1000
+
+// writeBatchSize is the maximum number of KV mutations in a single Update
+// transaction. Keeping writes small bounds transaction latency and reduces
+// conflict window under concurrent writes.
+const writeBatchSize = 500
+
 func newULID() string {
 	ulidMu.Lock()
 	defer ulidMu.Unlock()

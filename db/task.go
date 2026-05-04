@@ -59,39 +59,50 @@ func (d Database) CreateTasksFromResources(stepID string, resourceIDs []string) 
 	}
 
 	var taskIDs []string
-	err := d.badgerDB.Update(func(txn *badger.Txn) error {
-		for _, resourceID := range resourceIDs {
-			// Check unique constraint
-			uniqueKey := idxTaskUniqueKey(stepID, resourceID)
-			if keyExists(txn, uniqueKey) {
-				continue // already exists
-			}
-
-			id := newULID()
-			task := Task{
-				ID:              id,
-				StepID:          stepID,
-				InputResourceID: &resourceID,
-			}
-
-			if err := putEntity(txn, taskKey(id), &task); err != nil {
-				return err
-			}
-			if err := txn.Set(idxTaskByStepUnprocKey(stepID, id), nil); err != nil {
-				return err
-			}
-			if err := txn.Set(idxTaskByStepAllKey(stepID, id), nil); err != nil {
-				return err
-			}
-			if err := txn.Set(uniqueKey, []byte(id)); err != nil {
-				return err
-			}
-
-			taskIDs = append(taskIDs, id)
+	for i := 0; i < len(resourceIDs); i += writeBatchSize {
+		end := i + writeBatchSize
+		if end > len(resourceIDs) {
+			end = len(resourceIDs)
 		}
-		return nil
-	})
-	return taskIDs, err
+		chunk := resourceIDs[i:end]
+		err := d.badgerDB.Update(func(txn *badger.Txn) error {
+			for _, resourceID := range chunk {
+				// Check unique constraint
+				uniqueKey := idxTaskUniqueKey(stepID, resourceID)
+				if keyExists(txn, uniqueKey) {
+					continue // already exists
+				}
+
+				id := newULID()
+				resID := resourceID
+				task := Task{
+					ID:              id,
+					StepID:          stepID,
+					InputResourceID: &resID,
+				}
+
+				if err := putEntity(txn, taskKey(id), &task); err != nil {
+					return err
+				}
+				if err := txn.Set(idxTaskByStepUnprocKey(stepID, id), nil); err != nil {
+					return err
+				}
+				if err := txn.Set(idxTaskByStepAllKey(stepID, id), nil); err != nil {
+					return err
+				}
+				if err := txn.Set(uniqueKey, []byte(id)); err != nil {
+					return err
+				}
+
+				taskIDs = append(taskIDs, id)
+			}
+			return nil
+		})
+		if err != nil {
+			return taskIDs, err
+		}
+	}
+	return taskIDs, nil
 }
 
 func (d Database) GetTask(id string) (*Task, error) {
@@ -108,22 +119,48 @@ func (d Database) GetTasksForStep(stepID string) chan Task {
 	ch := make(chan Task)
 	go func() {
 		defer close(ch)
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			prefix := idxTaskByStepAllPrefix(stepID)
-			return prefixScanKeys(txn, prefix, func(key []byte) (bool, error) {
-				taskID := string(key[len(prefix):])
-				t, err := getEntity[Task](txn, taskKey(taskID))
-				if err != nil {
-					return false, err
+		prefix := idxTaskByStepAllPrefix(stepID)
+		cursor := append([]byte{}, prefix...)
+		for {
+			var tasks []Task
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				opts.PrefetchValues = false
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				var scanned int
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					key := it.Item().KeyCopy(nil)
+					lastKey = key
+					scanned++
+					taskID := string(key[len(prefix):])
+					t, err := getEntity[Task](txn, taskKey(taskID))
+					if err != nil {
+						return err
+					}
+					if t != nil {
+						tasks = append(tasks, *t)
+					}
+					if scanned >= scanBatchSize {
+						return nil
+					}
 				}
-				if t != nil {
-					ch <- *t
-				}
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			panic(err)
+			if err != nil {
+				panic(err)
+			}
+			for _, t := range tasks {
+				ch <- t
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = append(lastKey, 0x00)
 		}
 	}()
 	return ch
@@ -133,29 +170,53 @@ func (d Database) GetUnprocessedTasks(stepID string) chan Task {
 	ch := make(chan Task)
 	go func() {
 		defer close(ch)
-		var taskCount int64
-		defer func() {
-			dbLogger.Verbosef("GetUnprocessedTasks(step=%s) found %d unprocessed tasks\n", stepID, taskCount)
-		}()
-
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			prefix := idxTaskByStepUnprocPrefix(stepID)
-			return prefixScanKeys(txn, prefix, func(key []byte) (bool, error) {
-				taskID := string(key[len(prefix):])
-				t, err := getEntity[Task](txn, taskKey(taskID))
-				if err != nil {
-					return false, err
+		prefix := idxTaskByStepUnprocPrefix(stepID)
+		cursor := append([]byte{}, prefix...)
+		var total int
+		for {
+			var tasks []Task
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				opts.PrefetchValues = false
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				var scanned int
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					key := it.Item().KeyCopy(nil)
+					lastKey = key
+					scanned++
+					taskID := string(key[len(prefix):])
+					t, err := getEntity[Task](txn, taskKey(taskID))
+					if err != nil {
+						return err
+					}
+					if t != nil {
+						tasks = append(tasks, *t)
+					}
+					if scanned >= scanBatchSize {
+						return nil
+					}
 				}
-				if t != nil {
-					taskCount++
-					ch <- *t
-				}
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			dbLogger.Verbosef("Error querying unprocessed tasks for step %s: %v\n", stepID, err)
+			if err != nil {
+				dbLogger.Verbosef("Error querying unprocessed tasks for step %s: %v\n", stepID, err)
+				break
+			}
+			total += len(tasks)
+			for _, t := range tasks {
+				ch <- t
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = append(lastKey, 0x00)
 		}
+		dbLogger.Verbosef("GetUnprocessedTasks(step=%s) found %d unprocessed tasks\n", stepID, total)
 	}()
 	return ch
 }
@@ -171,6 +232,57 @@ func (d Database) GetTaskInputResource(taskID string) (*Resource, error) {
 		return err
 	})
 	return resource, err
+}
+
+// TaskStatusUpdate holds a single deferred status change for BatchUpdateTaskStatus.
+type TaskStatusUpdate struct {
+	ID        string
+	Processed bool
+	Error     *string
+}
+
+// BatchUpdateTaskStatus writes a slice of task status updates in chunks of
+// writeBatchSize, so no single transaction is unbounded.
+func (d Database) BatchUpdateTaskStatus(updates []TaskStatusUpdate) error {
+	for i := 0; i < len(updates); i += writeBatchSize {
+		end := i + writeBatchSize
+		if end > len(updates) {
+			end = len(updates)
+		}
+		chunk := updates[i:end]
+		err := d.badgerDB.Update(func(txn *badger.Txn) error {
+			for _, u := range chunk {
+				t, err := getEntity[Task](txn, taskKey(u.ID))
+				if err != nil || t == nil {
+					continue
+				}
+				wasProcessed := t.Processed
+				t.Processed = u.Processed
+				t.Error = u.Error
+				if err := putEntity(txn, taskKey(u.ID), t); err != nil {
+					return err
+				}
+				if wasProcessed != u.Processed {
+					if u.Processed {
+						_ = txn.Delete(idxTaskByStepUnprocKey(t.StepID, u.ID))
+						if err := txn.Set(idxTaskByStepProcKey(t.StepID, u.ID), nil); err != nil {
+							return err
+						}
+					} else {
+						_ = txn.Delete(idxTaskByStepProcKey(t.StepID, u.ID))
+						if err := txn.Set(idxTaskByStepUnprocKey(t.StepID, u.ID), nil); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d Database) UpdateTaskStatus(id string, processed bool, errorMsg *string) error {
@@ -278,85 +390,178 @@ func (d Database) ListTasks() chan Task {
 	ch := make(chan Task)
 	go func() {
 		defer close(ch)
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			return prefixScan(txn, []byte(prefixTask), func(key, val []byte) (bool, error) {
-				var t Task
-				if err := decode(val, &t); err != nil {
-					return true, nil
+		prefix := []byte(prefixTask)
+		cursor := append([]byte{}, prefix...)
+		for {
+			var tasks []Task
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					lastKey = it.Item().KeyCopy(nil)
+					var t Task
+					err := it.Item().Value(func(v []byte) error { return decode(v, &t) })
+					if err == nil {
+						tasks = append(tasks, t)
+					}
+					if len(tasks) >= scanBatchSize {
+						return nil
+					}
 				}
-				ch <- t
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			panic(err)
+			if err != nil {
+				panic(err)
+			}
+			for _, t := range tasks {
+				ch <- t
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = append(lastKey, 0x00)
 		}
 	}()
 	return ch
 }
 
 func (d Database) MarkStepTasksUnprocessed(stepID string) error {
-	return d.badgerDB.Update(func(txn *badger.Txn) error {
-		// Find all processed tasks for this step and mark them unprocessed
-		prefix := idxTaskByStepProcPrefix(stepID)
+	prefix := idxTaskByStepProcPrefix(stepID)
+	cursor := append([]byte{}, prefix...)
+	for {
 		var taskIDs []string
-		err := prefixScanKeys(txn, prefix, func(key []byte) (bool, error) {
-			taskIDs = append(taskIDs, string(key[len(prefix):]))
-			return true, nil
+		var lastKey []byte
+		var exhausted bool
+		err := d.badgerDB.View(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			opts.PrefetchValues = false
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+				key := it.Item().KeyCopy(nil)
+				taskIDs = append(taskIDs, string(key[len(prefix):]))
+				lastKey = key
+				if len(taskIDs) >= scanBatchSize {
+					return nil
+				}
+			}
+			exhausted = true
+			return nil
 		})
 		if err != nil {
 			return err
 		}
-
-		for _, taskID := range taskIDs {
-			t, err := getEntity[Task](txn, taskKey(taskID))
-			if err != nil || t == nil {
-				continue
+		if len(taskIDs) == 0 {
+			break
+		}
+		for i := 0; i < len(taskIDs); i += writeBatchSize {
+			end := i + writeBatchSize
+			if end > len(taskIDs) {
+				end = len(taskIDs)
 			}
-			t.Processed = false
-			t.Error = nil
-			if err := putEntity(txn, taskKey(taskID), t); err != nil {
-				return err
-			}
-			_ = txn.Delete(idxTaskByStepProcKey(stepID, taskID))
-			if err := txn.Set(idxTaskByStepUnprocKey(stepID, taskID), nil); err != nil {
+			chunk := taskIDs[i:end]
+			err = d.badgerDB.Update(func(txn *badger.Txn) error {
+				for _, taskID := range chunk {
+					t, err := getEntity[Task](txn, taskKey(taskID))
+					if err != nil || t == nil {
+						continue
+					}
+					t.Processed = false
+					t.Error = nil
+					if err := putEntity(txn, taskKey(taskID), t); err != nil {
+						return err
+					}
+					_ = txn.Delete(idxTaskByStepProcKey(stepID, taskID))
+					if err := txn.Set(idxTaskByStepUnprocKey(stepID, taskID), nil); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil {
 				return err
 			}
 		}
-		return nil
-	})
+		if exhausted || lastKey == nil {
+			break
+		}
+		cursor = append(lastKey, 0x00)
+	}
+	return nil
 }
 
 func (d Database) MarkStepUndone(stepID string) error {
-	return d.badgerDB.Update(func(txn *badger.Txn) error {
-		prefix := idxTaskByStepAllPrefix(stepID)
+	prefix := idxTaskByStepAllPrefix(stepID)
+	cursor := append([]byte{}, prefix...)
+	var totalDeleted int
+	for {
 		var taskIDs []string
-		err := prefixScanKeys(txn, prefix, func(key []byte) (bool, error) {
-			taskIDs = append(taskIDs, string(key[len(prefix):]))
-			return true, nil
+		var lastKey []byte
+		var exhausted bool
+		err := d.badgerDB.View(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			opts.PrefetchValues = false
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+				key := it.Item().KeyCopy(nil)
+				taskIDs = append(taskIDs, string(key[len(prefix):]))
+				lastKey = key
+				if len(taskIDs) >= scanBatchSize {
+					return nil
+				}
+			}
+			exhausted = true
+			return nil
 		})
 		if err != nil {
 			return err
 		}
-
-		for _, taskID := range taskIDs {
-			t, err := getEntity[Task](txn, taskKey(taskID))
-			if err != nil || t == nil {
-				continue
+		if len(taskIDs) == 0 {
+			break
+		}
+		for i := 0; i < len(taskIDs); i += writeBatchSize {
+			end := i + writeBatchSize
+			if end > len(taskIDs) {
+				end = len(taskIDs)
 			}
-			// Delete task and all its indexes
-			_ = txn.Delete(taskKey(taskID))
-			_ = txn.Delete(idxTaskByStepAllKey(stepID, taskID))
-			_ = txn.Delete(idxTaskByStepUnprocKey(stepID, taskID))
-			_ = txn.Delete(idxTaskByStepProcKey(stepID, taskID))
-			if t.InputResourceID != nil {
-				_ = txn.Delete(idxTaskUniqueKey(stepID, *t.InputResourceID))
+			chunk := taskIDs[i:end]
+			err = d.badgerDB.Update(func(txn *badger.Txn) error {
+				for _, taskID := range chunk {
+					t, err := getEntity[Task](txn, taskKey(taskID))
+					if err != nil || t == nil {
+						continue
+					}
+					// Delete task and all its indexes
+					_ = txn.Delete(taskKey(taskID))
+					_ = txn.Delete(idxTaskByStepAllKey(stepID, taskID))
+					_ = txn.Delete(idxTaskByStepUnprocKey(stepID, taskID))
+					_ = txn.Delete(idxTaskByStepProcKey(stepID, taskID))
+					if t.InputResourceID != nil {
+						_ = txn.Delete(idxTaskUniqueKey(stepID, *t.InputResourceID))
+					}
+					totalDeleted++
+				}
+				return nil
+			})
+			if err != nil {
+				return err
 			}
 		}
-
-		dbLogger.Verbosef("Marked step %s as undone: deleted %d tasks\n", stepID, len(taskIDs))
-		return nil
-	})
+		if exhausted || lastKey == nil {
+			break
+		}
+		cursor = append(lastKey, 0x00)
+	}
+	dbLogger.Verbosef("Marked step %s as undone: deleted %d tasks\n", stepID, totalDeleted)
+	return nil
 }
 
 func (d Database) IsStepComplete(stepID string) (bool, error) {
@@ -425,11 +630,30 @@ func (d Database) ScheduleTasksForStep(stepID string) (int64, error) {
 
 	dbLogger.Verbosef("Scheduling tasks for step %s (%s) with input: %s\n", stepID, step.Name, step.Input)
 
-	const scheduleBatchSize = 5000
+	const scheduleBatchSize = scanBatchSize
 	var totalScheduled int64
 
 	prefix := idxResourceByNamePrefix(step.Input)
-	cursor := append([]byte{}, prefix...) // start at beginning of prefix
+	cursor := append([]byte{}, prefix...) // start at beginning of prefix; may be advanced by watermark below
+
+	// Fast-forward cursor past resources already scheduled for this step.
+	// The unique index (ix:tu:{stepID}\x00{resourceID}) is ULID-ordered, so
+	// its last key is the highest resourceID already scheduled.  A single
+	// reverse seek gives us the resume point in O(1) instead of re-scanning
+	// the entire resource index on every startup.
+	uniquePrefix := []byte(idxTaskUnique + stepID + "\x00")
+	wmErr := d.badgerDB.View(func(txn *badger.Txn) error {
+		return prefixScanReverse(txn, uniquePrefix, func(key, _ []byte) (bool, error) {
+			lastResourceID := string(key[len(uniquePrefix):])
+			// Set cursor to just after the last scheduled resource key.
+			cursor = append(idxResourceByNameKey(step.Input, lastResourceID), 0x00)
+			return false, nil // stop after first (highest) result
+		})
+	})
+	if wmErr != nil {
+		dbLogger.Verbosef("ScheduleTasksForStep: step=%s watermark lookup error (proceeding from start): %v\n", stepID, wmErr)
+		cursor = append([]byte{}, prefix...) // reset to safe default
+	}
 
 	dbLogger.Verbosef("ScheduleTasksForStep: step=%s input=%s scanning\n", stepID, step.Input)
 
@@ -467,42 +691,49 @@ func (d Database) ScheduleTasksForStep(stepID string) (int64, error) {
 			stepID, step.Input, scanTotal, exhausted)
 
 		if len(batch) > 0 {
-			var written int
-			err = d.badgerDB.Update(func(txn *badger.Txn) error {
-				for _, resourceID := range batch {
-					uniqueKey := idxTaskUniqueKey(stepID, resourceID)
-					if keyExists(txn, uniqueKey) {
-						continue
-					}
-					id := newULID()
-					resID := resourceID
-					task := Task{
-						ID:              id,
-						StepID:          stepID,
-						InputResourceID: &resID,
-					}
-					if err := putEntity(txn, taskKey(id), &task); err != nil {
-						return err
-					}
-					if err := txn.Set(idxTaskByStepUnprocKey(stepID, id), nil); err != nil {
-						return err
-					}
-					if err := txn.Set(idxTaskByStepAllKey(stepID, id), nil); err != nil {
-						return err
-					}
-					if err := txn.Set(uniqueKey, []byte(id)); err != nil {
-						return err
-					}
-					written++
+			var batchWritten int
+			for j := 0; j < len(batch); j += writeBatchSize {
+				wEnd := j + writeBatchSize
+				if wEnd > len(batch) {
+					wEnd = len(batch)
 				}
-				return nil
-			})
-			if err != nil {
-				return totalScheduled, fmt.Errorf("failed to write task batch for step %s: %w", stepID, err)
+				chunk := batch[j:wEnd]
+				err = d.badgerDB.Update(func(txn *badger.Txn) error {
+					for _, resourceID := range chunk {
+						uniqueKey := idxTaskUniqueKey(stepID, resourceID)
+						if keyExists(txn, uniqueKey) {
+							continue
+						}
+						id := newULID()
+						resID := resourceID
+						task := Task{
+							ID:              id,
+							StepID:          stepID,
+							InputResourceID: &resID,
+						}
+						if err := putEntity(txn, taskKey(id), &task); err != nil {
+							return err
+						}
+						if err := txn.Set(idxTaskByStepUnprocKey(stepID, id), nil); err != nil {
+							return err
+						}
+						if err := txn.Set(idxTaskByStepAllKey(stepID, id), nil); err != nil {
+							return err
+						}
+						if err := txn.Set(uniqueKey, []byte(id)); err != nil {
+							return err
+						}
+						batchWritten++
+					}
+					return nil
+				})
+				if err != nil {
+					return totalScheduled, fmt.Errorf("failed to write task batch for step %s: %w", stepID, err)
+				}
 			}
-			totalScheduled += int64(written)
+			totalScheduled += int64(batchWritten)
 			dbLogger.Verbosef("ScheduleTasksForStep: step=%s input=%s batch_written=%d (race_skipped=%d) total_scheduled=%d\n",
-				stepID, step.Input, written, len(batch)-written, totalScheduled)
+				stepID, step.Input, batchWritten, len(batch)-batchWritten, totalScheduled)
 		}
 
 		if exhausted || len(lastKey) == 0 {

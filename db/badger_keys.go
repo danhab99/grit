@@ -114,3 +114,7 @@ func idxResourceByNamePrefix(name string) []byte {
 func metaCsvHashKey(path string) []byte {
 	return []byte(prefixMeta + "csvhash:" + path)
 }
+
+func metaCsvOffsetKey(path string) []byte {
+	return []byte(prefixMeta + "csvoffset:" + path)
+}

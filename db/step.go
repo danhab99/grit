@@ -117,24 +117,43 @@ func (d Database) GetStepsWithZeroInputs() chan Step {
 	ch := make(chan Step)
 	go func() {
 		defer close(ch)
-		// Scan all steps, filter those with no inputs
-		seen := make(map[string]bool) // track latest version per name
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			prefix := []byte(prefixStep)
-			return prefixScan(txn, prefix, func(key, val []byte) (bool, error) {
-				var s Step
-				if err := decode(val, &s); err != nil {
-					return true, nil
+		prefix := []byte(prefixStep)
+		cursor := append([]byte{}, prefix...)
+		for {
+			var steps []Step
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				var scanned int
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					lastKey = it.Item().KeyCopy(nil)
+					scanned++
+					var s Step
+					if err := it.Item().Value(func(v []byte) error { return decode(v, &s) }); err == nil && s.Input == "" {
+						steps = append(steps, s)
+					}
+					if scanned >= scanBatchSize {
+						return nil
+					}
 				}
-				if s.Input == "" {
-					ch <- s
-					seen[s.Name] = true
-				}
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			dbLogger.Verbosef("Error in GetStepsWithZeroInputs: %v\n", err)
+			if err != nil {
+				dbLogger.Verbosef("Error in GetStepsWithZeroInputs: %v\n", err)
+				break
+			}
+			for _, s := range steps {
+				ch <- s
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = append(lastKey, 0x00)
 		}
 	}()
 	return ch
@@ -148,19 +167,41 @@ func (d Database) ListSteps() chan Step {
 	ch := make(chan Step)
 	go func() {
 		defer close(ch)
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			prefix := []byte(prefixStep)
-			return prefixScan(txn, prefix, func(key, val []byte) (bool, error) {
-				var s Step
-				if err := decode(val, &s); err != nil {
-					return true, nil
+		prefix := []byte(prefixStep)
+		cursor := append([]byte{}, prefix...)
+		for {
+			var steps []Step
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					lastKey = it.Item().KeyCopy(nil)
+					var s Step
+					if err := it.Item().Value(func(v []byte) error { return decode(v, &s) }); err == nil {
+						steps = append(steps, s)
+					}
+					if len(steps) >= scanBatchSize {
+						return nil
+					}
 				}
-				ch <- s
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			dbLogger.Verbosef("Error in ListSteps: %v\n", err)
+			if err != nil {
+				dbLogger.Verbosef("Error in ListSteps: %v\n", err)
+				break
+			}
+			for _, s := range steps {
+				ch <- s
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = append(lastKey, 0x00)
 		}
 	}()
 	return ch
@@ -221,47 +262,61 @@ func (d Database) GetTaintedSteps() chan Step {
 	ch := make(chan Step)
 	go func() {
 		defer close(ch)
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			// Collect all steps grouped by name
-			stepsByName := make(map[string][]Step)
-			prefix := []byte(prefixStep)
-			err := prefixScan(txn, prefix, func(key, val []byte) (bool, error) {
-				var s Step
-				if err := decode(val, &s); err != nil {
-					return true, nil
+		// Collect all step versions across paginated Views, then emit tainted ones.
+		stepsByName := make(map[string][]Step)
+		prefix := []byte(prefixStep)
+		cursor := append([]byte{}, prefix...)
+		for {
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				var scanned int
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					lastKey = it.Item().KeyCopy(nil)
+					scanned++
+					var s Step
+					if err := it.Item().Value(func(v []byte) error { return decode(v, &s) }); err == nil {
+						stepsByName[s.Name] = append(stepsByName[s.Name], s)
+					}
+					if scanned >= scanBatchSize {
+						return nil
+					}
 				}
-				stepsByName[s.Name] = append(stepsByName[s.Name], s)
-				return true, nil
+				exhausted = true
+				return nil
 			})
 			if err != nil {
-				return err
+				fmt.Printf("Error in GetTaintedSteps: %v\n", err)
+				return
 			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = append(lastKey, 0x00)
+		}
 
-			// Find tainted steps: older versions where script or inputs differ from newer
-			for _, steps := range stepsByName {
-				if len(steps) < 2 {
-					continue
-				}
-				// Find max version
-				var maxVersion int
-				var maxStep Step
-				for _, s := range steps {
-					if s.Version > maxVersion {
-						maxVersion = s.Version
-						maxStep = s
-					}
-				}
-				// Emit older versions that differ
-				for _, s := range steps {
-					if s.Version < maxVersion && (s.Script != maxStep.Script || s.Input != maxStep.Input) {
-						ch <- s
-					}
+		// Find tainted steps: older versions where script or inputs differ from newer.
+		for _, steps := range stepsByName {
+			if len(steps) < 2 {
+				continue
+			}
+			var maxVersion int
+			var maxStep Step
+			for _, s := range steps {
+				if s.Version > maxVersion {
+					maxVersion = s.Version
+					maxStep = s
 				}
 			}
-			return nil
-		})
-		if err != nil {
-			fmt.Printf("Error in GetTaintedSteps: %v\n", err)
+			for _, s := range steps {
+				if s.Version < maxVersion && (s.Script != maxStep.Script || s.Input != maxStep.Input) {
+					ch <- s
+				}
+			}
 		}
 	}()
 	return ch

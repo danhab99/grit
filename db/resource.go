@@ -93,23 +93,59 @@ func (d Database) GetResourcesByName(name string) chan Resource {
 	ch := make(chan Resource)
 	go func() {
 		defer close(ch)
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			// Reverse scan: ULIDs are time-sorted, reverse gives newest first
-			prefix := idxResourceByNamePrefix(name)
-			return prefixScanReverse(txn, prefix, func(key, val []byte) (bool, error) {
-				resID := string(key[len(prefix):])
-				r, err := getEntity[Resource](txn, resourceKey(resID))
-				if err != nil {
-					return false, err
+		prefix := idxResourceByNamePrefix(name)
+		// Reverse scan: ULIDs are time-sorted, reverse gives newest first.
+		// cursor starts at the top of the range; skipFirst skips the already-seen
+		// cursor key on each subsequent batch (Seek in reverse lands on the key itself).
+		cursor := append(append([]byte{}, prefix...), 0xFF)
+		skipFirst := false
+		for {
+			var resources []Resource
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				opts.Reverse = true
+				opts.PrefetchValues = false
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				it.Seek(cursor)
+				if skipFirst && it.ValidForPrefix(prefix) {
+					it.Next()
 				}
-				if r != nil {
-					ch <- *r
+				var scanned int
+				for ; it.ValidForPrefix(prefix); it.Next() {
+					key := it.Item().KeyCopy(nil)
+					lastKey = key
+					scanned++
+					resID := string(key[len(prefix):])
+					r, err := getEntity[Resource](txn, resourceKey(resID))
+					if err != nil {
+						return err
+					}
+					if r != nil {
+						resources = append(resources, *r)
+					}
+					if scanned >= scanBatchSize {
+						return nil
+					}
 				}
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			dbLogger.Verbosef("Error querying resources by name %s: %v\n", name, err)
+			if err != nil {
+				dbLogger.Verbosef("Error querying resources by name %s: %v\n", name, err)
+				break
+			}
+			for _, r := range resources {
+				ch <- r
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = lastKey
+			skipFirst = true
 		}
 	}()
 	return ch
@@ -119,18 +155,42 @@ func (d Database) GetAllResources() chan Resource {
 	ch := make(chan Resource)
 	go func() {
 		defer close(ch)
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			return prefixScan(txn, []byte(prefixResource), func(key, val []byte) (bool, error) {
-				var r Resource
-				if err := decode(val, &r); err != nil {
-					return true, nil
+		prefix := []byte(prefixResource)
+		cursor := append([]byte{}, prefix...)
+		for {
+			var resources []Resource
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					lastKey = it.Item().KeyCopy(nil)
+					var r Resource
+					err := it.Item().Value(func(v []byte) error { return decode(v, &r) })
+					if err == nil {
+						resources = append(resources, r)
+					}
+					if len(resources) >= scanBatchSize {
+						return nil
+					}
 				}
-				ch <- r
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			dbLogger.Verbosef("Error querying all resources: %v\n", err)
+			if err != nil {
+				dbLogger.Verbosef("Error querying all resources: %v\n", err)
+				break
+			}
+			for _, r := range resources {
+				ch <- r
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = append(lastKey, 0x00)
 		}
 	}()
 	return ch
@@ -140,22 +200,46 @@ func (d Database) GetAllResourceNames() chan string {
 	ch := make(chan string)
 	go func() {
 		defer close(ch)
-		seen := make(map[string]bool)
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			return prefixScan(txn, []byte(prefixResource), func(key, val []byte) (bool, error) {
-				var r Resource
-				if err := decode(val, &r); err != nil {
-					return true, nil
+		prefix := []byte(prefixResource)
+		cursor := append([]byte{}, prefix...)
+		seen := make(map[string]bool) // global dedup across batches
+		for {
+			var names []string
+			var lastKey []byte
+			exhausted := false
+			var scanned int
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				for it.Seek(cursor); it.ValidForPrefix(prefix); it.Next() {
+					lastKey = it.Item().KeyCopy(nil)
+					scanned++
+					var r Resource
+					err := it.Item().Value(func(v []byte) error { return decode(v, &r) })
+					if err == nil && !seen[r.Name] {
+						seen[r.Name] = true
+						names = append(names, r.Name)
+					}
+					if scanned >= scanBatchSize {
+						return nil
+					}
 				}
-				if !seen[r.Name] {
-					seen[r.Name] = true
-					ch <- r.Name
-				}
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			dbLogger.Verbosef("Error querying resource names: %v\n", err)
+			if err != nil {
+				dbLogger.Verbosef("Error querying resource names: %v\n", err)
+				break
+			}
+			for _, n := range names {
+				ch <- n
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = append(lastKey, 0x00)
 		}
 	}()
 	return ch
@@ -165,27 +249,63 @@ func (d Database) GetUnconsumedResourcesByName(name string, consumingStepID stri
 	ch := make(chan Resource)
 	go func() {
 		defer close(ch)
-		err := d.badgerDB.View(func(txn *badger.Txn) error {
-			prefix := idxResourceByNamePrefix(name)
-			return prefixScanReverse(txn, prefix, func(key, val []byte) (bool, error) {
-				resID := string(key[len(prefix):])
-				// Check if this resource has already been consumed by this step
-				uniqueKey := idxTaskUniqueKey(consumingStepID, resID)
-				if keyExists(txn, uniqueKey) {
-					return true, nil // already consumed
+		prefix := idxResourceByNamePrefix(name)
+		cursor := append(append([]byte{}, prefix...), 0xFF)
+		skipFirst := false
+		for {
+			var resources []Resource
+			var lastKey []byte
+			exhausted := false
+			err := d.badgerDB.View(func(txn *badger.Txn) error {
+				opts := badger.DefaultIteratorOptions
+				opts.Prefix = prefix
+				opts.Reverse = true
+				opts.PrefetchValues = false
+				it := txn.NewIterator(opts)
+				defer it.Close()
+				it.Seek(cursor)
+				if skipFirst && it.ValidForPrefix(prefix) {
+					it.Next()
 				}
-				r, err := getEntity[Resource](txn, resourceKey(resID))
-				if err != nil {
-					return false, err
+				var scanned int
+				for ; it.ValidForPrefix(prefix); it.Next() {
+					key := it.Item().KeyCopy(nil)
+					lastKey = key
+					scanned++
+					resID := string(key[len(prefix):])
+					uniqueKey := idxTaskUniqueKey(consumingStepID, resID)
+					if keyExists(txn, uniqueKey) {
+						if scanned >= scanBatchSize {
+							return nil
+						}
+						continue
+					}
+					r, err := getEntity[Resource](txn, resourceKey(resID))
+					if err != nil {
+						return err
+					}
+					if r != nil {
+						resources = append(resources, *r)
+					}
+					if scanned >= scanBatchSize {
+						return nil
+					}
 				}
-				if r != nil {
-					ch <- *r
-				}
-				return true, nil
+				exhausted = true
+				return nil
 			})
-		})
-		if err != nil {
-			dbLogger.Verbosef("Error querying unconsumed resources for name %s, step %s: %v\n", name, consumingStepID, err)
+			if err != nil {
+				dbLogger.Verbosef("Error querying unconsumed resources for name %s, step %s: %v\n", name, consumingStepID, err)
+				break
+			}
+			for _, r := range resources {
+				ch <- r
+			}
+			if exhausted || lastKey == nil {
+				break
+			}
+			cursor = lastKey
+			skipFirst = true
 		}
 	}()
 	return ch
