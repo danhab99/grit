@@ -160,6 +160,25 @@ cat $INPUT_FILE | sort > $OUTPUT_DIR/sorted
 ./grit -manifest manifest.toml --db ./db -run -quiet
 ```
 
+### Data Management Commands
+```bash
+# Delete a single resource by ID.
+# Also deletes the underlying object blob when that hash is no longer referenced.
+./grit delete -db ./db -id <resource-id>
+
+# Delete all resources for a resource name.
+./grit delete -db ./db -name dataset-v1
+
+# Keep only newest N versions per resource name across the whole database.
+./grit prune -db ./db -keep 3
+
+# Prune only a single resource name.
+./grit prune -db ./db -name dataset-v1 -keep 2
+
+# Preview prune actions without writing changes.
+./grit prune -db ./db -keep 1 -dry-run
+```
+
 ## Overview
 
 GRIT (Go Runtime for Iterative Tasks) is a workflow automation tool that:

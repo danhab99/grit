@@ -9,6 +9,15 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 )
 
+type ResourceDeleteResult struct {
+	ResourceID          string
+	Name                string
+	ObjectHash          string
+	ResourceDeleted     bool
+	ObjectDeleted       bool
+	RemainingObjectRefs int64
+}
+
 func (d Database) CreateResource(name string, objectHash string) (string, error) {
 	return d.CreateResourceWithTask(name, objectHash, nil)
 }
@@ -332,4 +341,101 @@ func (d Database) DeleteResource(id string) error {
 		_ = txn.Delete(idxResourceHashKey(r.Name, r.ObjectHash))
 		return nil
 	})
+}
+
+func (d Database) DeleteResourceHard(id string) (ResourceDeleteResult, error) {
+	res := ResourceDeleteResult{ResourceID: id}
+	var deleteFSFile bool
+	err := d.badgerDB.Update(func(txn *badger.Txn) error {
+		r, err := getEntity[Resource](txn, resourceKey(id))
+		if err != nil {
+			return err
+		}
+		if r == nil {
+			return nil
+		}
+
+		res.Name = r.Name
+		res.ObjectHash = r.ObjectHash
+
+		if err := txn.Delete(resourceKey(id)); err != nil {
+			return err
+		}
+		if err := txn.Delete(idxResourceByNameKey(r.Name, id)); err != nil {
+			return err
+		}
+		if err := txn.Delete(idxResourceHashKey(r.Name, r.ObjectHash)); err != nil {
+			return err
+		}
+		res.ResourceDeleted = true
+
+		remainingRefs, err := countResourcesByObjectHashTxn(txn, r.ObjectHash)
+		if err != nil {
+			return err
+		}
+		res.RemainingObjectRefs = remainingRefs
+
+		if remainingRefs > 0 {
+			return nil
+		}
+
+		hashBytes, err := hex.DecodeString(r.ObjectHash)
+		if err != nil {
+			return err
+		}
+
+		item, err := txn.Get(objectKey(hashBytes))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		val, err := item.ValueCopy(nil)
+		if err != nil {
+			return err
+		}
+		deleteFSFile = string(val) == fsSentinel
+
+		if err := txn.Delete(objectKey(hashBytes)); err != nil {
+			return err
+		}
+		res.ObjectDeleted = true
+		return nil
+	})
+	if err != nil {
+		return res, err
+	}
+
+	if deleteFSFile {
+		if err := removeObjectFileIfExists(d.objectFilePath(res.ObjectHash)); err != nil {
+			return res, err
+		}
+	}
+
+	return res, nil
+}
+
+func countResourcesByObjectHashTxn(txn *badger.Txn, objectHash string) (int64, error) {
+	var count int64
+	prefix := []byte(prefixResource)
+	opts := badger.DefaultIteratorOptions
+	opts.Prefix = prefix
+	opts.PrefetchValues = true
+	it := txn.NewIterator(opts)
+	defer it.Close()
+
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		var r Resource
+		err := it.Item().Value(func(v []byte) error { return decode(v, &r) })
+		if err != nil {
+			return 0, err
+		}
+		if r.ObjectHash == objectHash {
+			count++
+		}
+	}
+
+	return count, nil
 }

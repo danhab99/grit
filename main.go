@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 
+	"grit/cmd/delete_resource"
 	"grit/cmd/export"
 	"grit/cmd/progress"
+	"grit/cmd/prune_resources"
 	"grit/cmd/run"
 )
 
@@ -37,6 +39,18 @@ func main() {
 		progressCmd.Parse(os.Args[2:])
 		progress.Execute()
 
+	case "delete":
+		deleteResourceCmd := flag.NewFlagSet("delete", flag.ExitOnError)
+		delete_resource.RegisterFlags(deleteResourceCmd)
+		deleteResourceCmd.Parse(os.Args[2:])
+		delete_resource.Execute()
+
+	case "prune":
+		pruneResourcesCmd := flag.NewFlagSet("prune", flag.ExitOnError)
+		prune_resources.RegisterFlags(pruneResourcesCmd)
+		pruneResourcesCmd.Parse(os.Args[2:])
+		prune_resources.Execute()
+
 	case "help", "-h", "--help":
 		printUsage()
 
@@ -55,5 +69,7 @@ func printUsage() {
 	fmt.Println("  run       Run the pipeline")
 	fmt.Println("  export    Export resources from the database")
 	fmt.Println("  progress  Show pipeline progress and statistics")
+	fmt.Println("  delete   Delete resources and unreferenced object blobs")
+	fmt.Println("  prune    Prune old resource versions by keeping newest N")
 	fmt.Println("\nUse 'grit <command> -h' for more information about a command.")
 }
