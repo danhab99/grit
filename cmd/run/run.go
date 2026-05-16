@@ -5,10 +5,10 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
@@ -16,14 +16,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"path/filepath"
 
 	"grit/db"
 	"grit/exec"
-	"grit/types"
 	"grit/log"
 	"grit/manifest"
 	"grit/pipeline"
+	"grit/types"
 	"grit/utils"
 
 	"github.com/pelletier/go-toml"
@@ -59,33 +58,12 @@ func RegisterFlags(fs *flag.FlagSet) {
 	dbPath = fs.String("db", "./db", "database path")
 	parallel = fs.Int("parallel", runtime.NumCPU(), "number of processes to run in parallel")
 	fs.Var(&enabledSteps, "step", "steps to run (can be specified multiple times)")
-	pprofAddr = fs.String("pprof", "", "enable pprof HTTP server on this address (e.g. :6060)")
-	profileDir = fs.String("profiledir", "", "directory to write periodic heap/cpu profiles into")
-	profileInterval = fs.Duration("profileinterval", 30*time.Second, "how often to write profiles when -profiledir is set")
 }
 
 // Execute runs the pipeline
 func Execute() {
 	// Set before any allocations so every allocation is sampled.
 	runtime.MemProfileRate = 1
-
-	if *profileDir != "" {
-		if err := os.MkdirAll(*profileDir, 0o755); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating profile dir: %v\n", err)
-			os.Exit(1)
-		}
-		stopSnapshots := startPeriodicProfiles(*profileDir, *profileInterval)
-		defer stopSnapshots()
-	}
-
-	if *pprofAddr != "" {
-		go func() {
-			runLogger.Printf("pprof listening on http://%s/debug/pprof/\n", *pprofAddr)
-			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
-				runLogger.Printf("pprof server error: %v\n", err)
-			}
-		}()
-	}
 
 	if *manifestPath == "" {
 		fmt.Fprintf(os.Stderr, "Error: -manifest is required\n")
@@ -127,9 +105,6 @@ func Execute() {
 	database.StartValueLogGC(30*time.Second, stopGC)
 	defer close(stopGC)
 
-	stopMem := startMemoryLogger(30 * time.Second)
-	defer stopMem()
-
 	run(m, database, *parallel, enabledSteps)
 }
 
@@ -155,37 +130,10 @@ func readRSSKB() int64 {
 	return 0
 }
 
-// startMemoryLogger logs Go heap and process RSS at the given interval.
-func startMemoryLogger(interval time.Duration) func() {
-	ticker := time.NewTicker(interval)
-	done := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				var ms runtime.MemStats
-				runtime.ReadMemStats(&ms)
-				rssKB := readRSSKB()
-				runLogger.Printf("MEM heap_inuse=%dMB heap_sys=%dMB rss=%dMB goroutines=%d\n",
-					ms.HeapInuse/1024/1024,
-					ms.HeapSys/1024/1024,
-					rssKB/1024,
-					runtime.NumGoroutine())
-			case <-done:
-				return
-			}
-		}
-	}()
-	return func() {
-		ticker.Stop()
-		close(done)
-	}
-}
-
-// startPeriodicProfiles writes heap and CPU profiles to dir at every interval.
 // Each tick produces:
-//   profiles/heap_001.pprof  – inuse/alloc heap snapshot
-//   profiles/cpu_001.pprof   – CPU activity over the interval
+//
+//	profiles/heap_001.pprof  – inuse/alloc heap snapshot
+//	profiles/cpu_001.pprof   – CPU activity over the interval
 //
 // Returns a stop func that flushes one final snapshot before returning.
 func startPeriodicProfiles(dir string, interval time.Duration) func() {
@@ -301,7 +249,7 @@ func constructRunnerPipeline(m manifest.Manifest, database db.Database, enabledS
 
 	go func() {
 		c := make(chan os.Signal, 1)
-		signal.Notify(c, syscall.SIGABRT, os.Interrupt, os.Kill)
+		signal.Notify(c, syscall.SIGABRT, os.Interrupt, os.Kill, syscall.SIGTERM)
 		<-c
 		stop()
 	}()
