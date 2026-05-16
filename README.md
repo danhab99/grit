@@ -102,6 +102,11 @@ Alternatively, add it to your home-manager configuration:
 go build -o grit
 ```
 
+### Build Smaller Binary
+```bash
+go build -trimpath -ldflags="-s -w" -o grit
+```
+
 ### Run a Pipeline
 ```bash
 ./grit -manifest workflow.toml -db ./my-pipeline-db -run
